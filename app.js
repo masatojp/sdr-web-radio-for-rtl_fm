@@ -1,6 +1,6 @@
 /**
- * Hybrid Web SDR - Full Features
- * Core: rtl_fm (Demodulation) -> Node.js (Audio FX, Squelch, Streaming, UI)
+ * Modern Web SDR - UI Remastered
+ * Core: rtl_fm -> Node.js -> Modern UI
  */
 
 const http = require('http');
@@ -8,7 +8,6 @@ const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const crypto = require('crypto'); // For future extensions
 
 // ==========================================
 // 設定 (Configuration)
@@ -17,10 +16,10 @@ const CONFIG = {
     webPort: 3000,
     password: "admin", // チューニング用パスワード
     
-    // SDR設定
-    initialFreq: 128800000,
+    // SDR初期設定
+    initialFreq: 128800000, // 128.80 MHz
     initialMode: 'AM',
-    sampleRate: 24000, // 24kHz (rtl_fmの出力レート)
+    sampleRate: 24000,
     ppm: 0,
     
     // パス設定
@@ -29,257 +28,138 @@ const CONFIG = {
     squelchFile: path.join(__dirname, 'squelch_data.json'),
 };
 
-// ディレクトリ作成
 if (!fs.existsSync(CONFIG.recordingsPath)) fs.mkdirSync(CONFIG.recordingsPath);
 
 // ==========================================
-// データ管理 (ブックマーク & スケルチ)
+// データ管理
 // ==========================================
 let bookmarks = [];
-let squelchDB = {}; // 周波数ごとのノイズフロア保存用
+let squelchDB = {};
 
 function loadData() {
     try {
         if (fs.existsSync(CONFIG.bookmarksFile)) bookmarks = JSON.parse(fs.readFileSync(CONFIG.bookmarksFile));
         if (fs.existsSync(CONFIG.squelchFile)) squelchDB = JSON.parse(fs.readFileSync(CONFIG.squelchFile));
-        console.log(`[System] Loaded ${bookmarks.length} bookmarks.`);
-    } catch (e) { console.error('[System] Load Error:', e); }
+    } catch (e) {}
 }
-
 function saveData() {
     fs.writeFile(CONFIG.bookmarksFile, JSON.stringify(bookmarks, null, 2), () => {});
     fs.writeFile(CONFIG.squelchFile, JSON.stringify(squelchDB, null, 2), () => {});
 }
-
 loadData();
 
 // ==========================================
-// DSP & Audio Processing (Node.js)
+// DSP (Audio Processing)
 // ==========================================
 class AudioDSP {
-    constructor() {
-        this.reset();
-    }
-
+    constructor() { this.reset(); }
     reset() {
-        this.lastIn = 0;
-        this.lastOut = 0;
-        this.agcPeak = 0;
-        this.agcGain = 1.0;
-        this.squelchGate = 0.0; // 0.0 = Muted, 1.0 = Open
-        this.rms = 0; // 現在の音量（Signal Meter用）
+        this.lastIn = 0; this.lastOut = 0;
+        this.agcPeak = 0; this.agcGain = 1.0;
+        this.squelchGate = 0.0; this.rms = 0;
     }
-
-    // 16bit PCM Bufferを受け取り、加工して返す
     process(inputBuffer, opts) {
-        const inputLen = inputBuffer.length / 2; // Int16 samples
+        const inputLen = inputBuffer.length / 2;
         const outputBuffer = Buffer.alloc(inputLen * 2);
-        
-        const squelchThresh = opts.squelchThreshold / 100.0; // 0.0 - 1.0
+        const squelchThresh = opts.squelchThreshold / 100.0;
         let sumSq = 0;
 
         for (let i = 0; i < inputLen; i++) {
-            // Int16 -> Float (-1.0 ~ 1.0)
             let sample = inputBuffer.readInt16LE(i * 2) / 32768.0;
+            
+            // HPF (DC Cut)
+            let raw = sample;
+            sample = raw - 0.95 * this.lastIn + 0.95 * this.lastOut;
+            this.lastIn = raw; this.lastOut = sample;
 
-            // 1. DC除去 (HPF) - 低周波ノイズカット
-            let rawSample = sample;
-            sample = rawSample - 0.95 * this.lastIn + 0.95 * this.lastOut;
-            this.lastIn = rawSample;
-            this.lastOut = sample;
-
-            // 2. 音量測定 (RMS計算用)
             sumSq += sample * sample;
 
-            // 3. 簡易AGC (コンプレッサー)
-            // 航空無線: 管制塔(小)と航空機(大)の差を埋める
+            // AGC
             const absSample = Math.abs(sample);
             this.agcPeak = this.agcPeak * 0.999 + absSample * 0.001;
-            
             let targetGain = 0.6 / (this.agcPeak + 0.05);
-            if (targetGain > 15.0) targetGain = 15.0; // 無音時の過剰増幅防止
+            if (targetGain > 15.0) targetGain = 15.0;
             if (targetGain < 1.0) targetGain = 1.0;
-
             this.agcGain = this.agcGain * 0.99 + targetGain * 0.01;
             
-            // AGC適用
-            let processed = sample * this.agcGain;
-
-            // 4. ノイズゲート (ソフトウェアスケルチ)
-            // AGC前の生レベルで判定するのが理想だが、AGC後の方が聴感に近い場合もある
-            // ここでは「ノイズフロア」と比較するため、平滑化されたRMSを使う
-            // 処理は後述のブロックで行い、ここでは現在のGate状態を適用
-            processed *= this.squelchGate;
-
-            // 5. リミッター
+            let processed = sample * this.agcGain * this.squelchGate;
+            
+            // Limiter
             if (processed > 0.98) processed = 0.98;
             if (processed < -0.98) processed = -0.98;
 
             outputBuffer.writeInt16LE(Math.floor(processed * 32767), i * 2);
         }
 
-        // ブロックごとのRMS計算とスケルチ判定
         const blockRms = Math.sqrt(sumSq / inputLen);
-        this.rms = this.rms * 0.8 + blockRms * 0.2; // 表示用の平滑化
+        this.rms = this.rms * 0.8 + blockRms * 0.2;
 
-        // ヒステリシス付きスケルチロジック
-        const openThresh = Math.max(0.005, squelchThresh); // 最低限のフロア
+        // Squelch Logic
+        const openThresh = Math.max(0.005, squelchThresh);
         const closeThresh = openThresh * 0.8;
-
-        if (this.rms > openThresh) {
-            // Attack (Open Fast)
-            this.squelchGate = 0.9 * this.squelchGate + 0.1 * 1.0;
-        } else if (this.rms < closeThresh) {
-            // Release (Close Slow)
-            this.squelchGate = 0.95 * this.squelchGate; // Fade out
+        if (this.rms > openThresh) this.squelchGate = 0.9 * this.squelchGate + 0.1;
+        else if (this.rms < closeThresh) {
+            this.squelchGate *= 0.95;
             if (this.squelchGate < 0.01) this.squelchGate = 0;
         }
 
-        // 表示用RSSI (0-100)
         const displayRssi = Math.min(100, Math.floor(Math.sqrt(this.rms) * 200)); 
-
         return { buffer: outputBuffer, rssi: displayRssi, isOpen: this.squelchGate > 0.1 };
     }
 }
-
 const dsp = new AudioDSP();
 
 // ==========================================
-// RTL-SDR 管理 (child_process)
+// RTL-SDR Backend
 // ==========================================
 let rtlProcess = null;
 let currentFreq = CONFIG.initialFreq;
 let currentMode = CONFIG.initialMode;
-let currentAtt = 'off'; // off, weak, strong
+let currentAtt = 'off';
 let isTuning = false;
-
-// 録音管理
 let isRecording = false;
 let recordingStream = null;
 let recordingFilename = "";
+let squelchThreshold = 10;
 
 function startRadio(freq, mode, att) {
-    if (rtlProcess) {
-        rtlProcess.kill(); // 前のプロセスを終了
-        rtlProcess = null;
-    }
+    if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
+    
+    currentFreq = freq; currentMode = mode; currentAtt = att;
+    isTuning = true; dsp.reset();
 
-    currentFreq = freq;
-    currentMode = mode;
-    currentAtt = att;
-    isTuning = true;
-    dsp.reset(); // DSP状態リセット
+    let gainVal = '40';
+    if (att === 'weak') gainVal = '20';
+    if (att === 'strong') gainVal = '0';
 
-    // ATT設定からゲイン値を決定
-    let gainVal = '40'; // Default (High Sensitivity)
-    if (att === 'weak') gainVal = '20'; // ATT Weak
-    if (att === 'strong') gainVal = '0'; // ATT Strong
-
-    // rtl_fm 引数構築
-    const args = [
-        '-M', mode === 'FM' ? 'fm' : 'am', // am / fm
-        '-f', freq.toString(),
-        '-s', CONFIG.sampleRate.toString(),
-        '-g', gainVal,
-        '-p', CONFIG.ppm.toString(),
-        // 以下の設定でrtl_fm内蔵のフィルタ品質を上げる
-        '-F', '9', 
-    ];
-
-    console.log(`[Radio] Start: ${freq}Hz ${mode} Gain:${gainVal}`);
-
+    const args = ['-M', mode === 'FM' ? 'fm' : 'am', '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
+    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode})`);
+    
     rtlProcess = spawn('rtl_fm', args);
-
-    rtlProcess.stdout.on('data', (chunk) => {
-        // 音声処理 & 配信
-        handleAudioStream(chunk);
-    });
-
-    rtlProcess.on('close', (code) => {
-        console.log(`[Radio] Stopped (Code: ${code})`);
-    });
-
-    // チューニング完了通知（少し待ってから）
-    setTimeout(() => {
-        isTuning = false;
-        broadcastStatus();
-    }, 500);
+    rtlProcess.stdout.on('data', (chunk) => handleAudioStream(chunk));
+    
+    setTimeout(() => { isTuning = false; broadcastStatus(); }, 500);
 }
 
-// ==========================================
-// ストリーミング & 録音ロジック
-// ==========================================
-let squelchThreshold = 10; // 0-100 (Arbitrary)
-
 function handleAudioStream(rawChunk) {
-    // DSP処理
     const result = dsp.process(rawChunk, { squelchThreshold });
-    
-    // WebSocket配信
-    const header = new Int16Array(1);
-    header[0] = result.rssi; // 最初の2バイトにRSSIを埋め込む
-    
-    // RSSIヘッダ + 音声データ
+    const header = new Int16Array(1); header[0] = result.rssi;
     const sendBuffer = Buffer.concat([Buffer.from(header.buffer), result.buffer]);
 
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(sendBuffer);
-        }
-    });
+    wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(sendBuffer); });
 
-    // 録音 (WAV書き込み)
     if (isRecording && recordingStream && result.isOpen) {
-        // スケルチが開いている時のみ書き込む（容量節約）
         recordingStream.write(result.buffer);
     }
 }
 
-// WAVヘッダ書き込みヘルパー
-function writeWavHeader(stream, sampleRate, dataLength) {
-    const buffer = Buffer.alloc(44);
-    // RIFF identifier
-    buffer.write('RIFF', 0);
-    // file length (data + 36)
-    buffer.writeUInt32LE(36 + dataLength, 4);
-    // RIFF type
-    buffer.write('WAVE', 8);
-    // format chunk identifier
-    buffer.write('fmt ', 12);
-    // format chunk length
-    buffer.writeUInt32LE(16, 16);
-    // sample format (1 is PCM)
-    buffer.writeUInt16LE(1, 20);
-    // channels (1)
-    buffer.writeUInt16LE(1, 22);
-    // sample rate
-    buffer.writeUInt32LE(sampleRate, 24);
-    // byte rate (sampleRate * blockAlign)
-    buffer.writeUInt32LE(sampleRate * 2, 28);
-    // block align (channels * bytes per sample)
-    buffer.writeUInt16LE(2, 32);
-    // bits per sample
-    buffer.writeUInt16LE(16, 34);
-    // data chunk identifier
-    buffer.write('data', 36);
-    // data chunk length
-    buffer.writeUInt32LE(dataLength, 40);
-    
-    stream.write(buffer);
-}
-
 function startRec() {
     if (isRecording) return;
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    recordingFilename = `${currentMode}_${(currentFreq/1e6).toFixed(3)}MHz_${timestamp}.wav`;
-    const filePath = path.join(CONFIG.recordingsPath, recordingFilename);
-    
-    console.log(`[Rec] Start: ${recordingFilename}`);
-    
-    // WAVストリーム作成 (ヘッダは後で書き直すため、まずはプレースホルダ)
-    recordingStream = fs.createWriteStream(filePath);
-    writeWavHeader(recordingStream, CONFIG.sampleRate, 0); // 仮ヘッダ
-    
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    recordingFilename = `${currentMode}_${(currentFreq/1e6).toFixed(3)}MHz_${ts}.wav`;
+    const fp = path.join(CONFIG.recordingsPath, recordingFilename);
+    recordingStream = fs.createWriteStream(fp);
+    writeWavHeader(recordingStream, CONFIG.sampleRate, 0);
     isRecording = true;
     broadcastStatus();
 }
@@ -287,508 +167,656 @@ function startRec() {
 function stopRec() {
     if (!isRecording) return;
     isRecording = false;
-    
     if (recordingStream) {
-        const filePath = recordingStream.path;
-        const bytesWritten = recordingStream.bytesWritten - 44; // ヘッダ分引く
+        const fp = recordingStream.path;
+        const bytes = recordingStream.bytesWritten - 44;
         recordingStream.end();
-        
-        // ヘッダを正しいサイズで書き直す
-        // fdを開いて先頭を書き換える
         setTimeout(() => {
-            fs.open(filePath, 'r+', (err, fd) => {
+            fs.open(fp, 'r+', (err, fd) => {
                 if (!err) {
-                    const headerBuf = Buffer.alloc(44);
-                    // create temp stream to generate header buffer logic reused
-                    // ...簡易実装: 手動で構築
                     const buf = Buffer.alloc(44);
-                    buf.write('RIFF', 0);
-                    buf.writeUInt32LE(36 + bytesWritten, 4);
-                    buf.write('WAVE', 8);
-                    buf.write('fmt ', 12);
-                    buf.writeUInt32LE(16, 16);
-                    buf.writeUInt16LE(1, 20);
-                    buf.writeUInt16LE(1, 22);
-                    buf.writeUInt32LE(CONFIG.sampleRate, 24);
-                    buf.writeUInt32LE(CONFIG.sampleRate * 2, 28);
-                    buf.writeUInt16LE(2, 32);
-                    buf.writeUInt16LE(16, 34);
-                    buf.write('data', 36);
-                    buf.writeUInt32LE(bytesWritten, 40);
+                    // Minimal WAV Header update
+                    buf.write('RIFF', 0); buf.writeUInt32LE(36 + bytes, 4); buf.write('WAVE', 8);
+                    buf.write('fmt ', 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20);
+                    buf.writeUInt16LE(1, 22); buf.writeUInt32LE(CONFIG.sampleRate, 24);
+                    buf.writeUInt32LE(CONFIG.sampleRate * 2, 28); buf.writeUInt16LE(2, 32);
+                    buf.writeUInt16LE(16, 34); buf.write('data', 36); buf.writeUInt32LE(bytes, 40);
                     fs.write(fd, buf, 0, 44, 0, () => fs.close(fd, ()=>{}));
                 }
             });
         }, 100);
-        
-        console.log(`[Rec] Stop: ${bytesWritten} bytes audio`);
         recordingStream = null;
     }
-    broadcastStatus();
-    broadcastRecordings();
+    broadcastStatus(); broadcastRecordings();
+}
+
+function writeWavHeader(stream, sampleRate, len) {
+    const b = Buffer.alloc(44);
+    b.write('RIFF',0); b.writeUInt32LE(36+len,4); b.write('WAVE',8); b.write('fmt ',12);
+    b.writeUInt32LE(16,16); b.writeUInt16LE(1,20); b.writeUInt16LE(1,22); b.writeUInt32LE(sampleRate,24);
+    b.writeUInt32LE(sampleRate*2,28); b.writeUInt16LE(2,32); b.writeUInt16LE(16,34); b.write('data',36);
+    b.writeUInt32LE(len,40); stream.write(b);
 }
 
 // ==========================================
-// Web Server & WebSocket Commands
+// Server & WebSocket
 // ==========================================
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    
     if (url.pathname === '/') {
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(htmlContent); // HTMLは最下部に定義
+        res.end(htmlContent);
     } else if (url.pathname.startsWith('/download/')) {
-        const fname = path.basename(decodeURIComponent(url.pathname));
-        const fpath = path.join(CONFIG.recordingsPath, fname);
-        if (fs.existsSync(fpath)) {
-            res.writeHead(200, {
-                'Content-Type': 'audio/wav',
-                'Content-Disposition': `attachment; filename="${fname}"`
-            });
-            fs.createReadStream(fpath).pipe(res);
-        } else {
-            res.writeHead(404); res.end('Not Found');
-        }
-    } else {
-        res.writeHead(404); res.end();
-    }
+        const f = path.basename(decodeURIComponent(url.pathname));
+        const fp = path.join(CONFIG.recordingsPath, f);
+        if (fs.existsSync(fp)) {
+            res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Disposition': `attachment; filename="${f}"` });
+            fs.createReadStream(fp).pipe(res);
+        } else { res.writeHead(404); res.end(); }
+    } else { res.writeHead(404); res.end(); }
 });
-
 const wss = new WebSocket.Server({ server });
 
 function broadcastStatus() {
-    const status = {
-        type: 'status_update',
-        freq: currentFreq,
-        mode: currentMode,
-        att: currentAtt,
-        isRecording: isRecording,
-        squelch: squelchThreshold
-    };
-    wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN) c.send(JSON.stringify(status)); });
+    const msg = JSON.stringify({ type: 'status_update', freq: currentFreq, mode: currentMode, att: currentAtt, isRecording, squelch: squelchThreshold });
+    wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN) c.send(msg); });
 }
-
 function broadcastRecordings() {
     try {
-        const files = fs.readdirSync(CONFIG.recordingsPath)
-            .filter(f => f.endsWith('.wav'))
-            .map(f => {
-                const stat = fs.statSync(path.join(CONFIG.recordingsPath, f));
-                return { name: f, size: stat.size, date: stat.mtime };
-            })
-            .sort((a,b) => b.date - a.date);
-        
-        const msg = JSON.stringify({ type: 'recordings', data: files });
+        const d = fs.readdirSync(CONFIG.recordingsPath).filter(f=>f.endsWith('.wav')).map(f=>({name:f, size:fs.statSync(path.join(CONFIG.recordingsPath,f)).size})).sort((a,b)=>b.name.localeCompare(a.name));
+        const msg = JSON.stringify({type:'recordings', data:d});
         wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN) c.send(msg); });
-    } catch(e) {}
+    } catch(e){}
 }
 
-wss.on('connection', (ws) => {
-    broadcastStatus();
-    ws.send(JSON.stringify({ type: 'bookmarks', data: bookmarks }));
-    broadcastRecordings();
-
-    ws.on('message', (msg) => {
+wss.on('connection', ws => {
+    broadcastStatus(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); broadcastRecordings();
+    ws.on('message', m => {
         try {
-            const cmd = JSON.parse(msg);
-            
-            if (cmd.type === 'auth_tune') {
-                if (cmd.password === CONFIG.password) {
-                    startRadio(cmd.freq, cmd.mode, currentAtt);
-                } else {
-                    ws.send(JSON.stringify({ type: 'error', msg: 'Incorrect Password' }));
-                }
+            const c = JSON.parse(m);
+            if (c.type === 'auth_tune') {
+                if (c.password === CONFIG.password) startRadio(c.freq, c.mode, currentAtt);
+                else ws.send(JSON.stringify({type:'error', msg:'Wrong Password'}));
             }
-            else if (cmd.type === 'set_att') {
-                startRadio(currentFreq, currentMode, cmd.att); // ATT変更は再起動が必要
-            }
-            else if (cmd.type === 'set_squelch') {
-                squelchThreshold = cmd.val;
-                // 保存
-                squelchDB[currentFreq] = squelchThreshold;
-                saveData();
-                broadcastStatus();
-            }
-            else if (cmd.type === 'start_recording') startRec();
-            else if (cmd.type === 'stop_recording') stopRec();
-            else if (cmd.type === 'delete_recording') {
-                const fpath = path.join(CONFIG.recordingsPath, cmd.filename);
-                if(fs.existsSync(fpath)) fs.unlinkSync(fpath);
-                broadcastRecordings();
-            }
-            else if (cmd.type === 'add_bookmark') {
-                cmd.data.id = Date.now().toString();
-                bookmarks.push(cmd.data);
-                saveData();
-                ws.send(JSON.stringify({ type: 'bookmarks', data: bookmarks }));
-            }
-            else if (cmd.type === 'delete_bookmark') {
-                bookmarks = bookmarks.filter(b => b.id !== cmd.id);
-                saveData();
-                ws.send(JSON.stringify({ type: 'bookmarks', data: bookmarks }));
-            }
-        } catch(e) { console.error(e); }
+            else if (c.type === 'set_att') startRadio(currentFreq, currentMode, c.att);
+            else if (c.type === 'set_squelch') { squelchThreshold = c.val; squelchDB[currentFreq] = c.val; saveData(); broadcastStatus(); }
+            else if (c.type === 'start_recording') startRec();
+            else if (c.type === 'stop_recording') stopRec();
+            else if (c.type === 'delete_recording') { fs.unlinkSync(path.join(CONFIG.recordingsPath, c.filename)); broadcastRecordings(); }
+            else if (c.type === 'add_bookmark') { c.data.id = Date.now().toString(); bookmarks.push(c.data); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
+            else if (c.type === 'delete_bookmark') { bookmarks = bookmarks.filter(b=>b.id!==c.id); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
+        } catch(e){}
     });
 });
 
-// サーバー起動
 server.listen(CONFIG.webPort, () => {
-    console.log(`[Server] Running on http://localhost:${CONFIG.webPort}`);
+    console.log(`[System] Interface Ready: http://localhost:${CONFIG.webPort}`);
     startRadio(CONFIG.initialFreq, CONFIG.initialMode, 'off');
 });
 
 // ==========================================
-// フロントエンド (HTML/CSS/JS)
+// Modern Frontend (HTML/CSS/JS)
 // ==========================================
 const htmlContent = `
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SDR Monitor Pro</title>
-<meta name="theme-color" content="#000000">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📡</text></svg>">
-<style>
-    :root { --primary: #00e676; --bg: #000; --panel: #1a1a1a; --text: #e0e0e0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; overscroll-behavior-y: none; }
-    .container { width: 100%; max-width: 420px; padding-bottom: 60px; }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SDR COMMANDER</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
     
-    /* Main Display */
-    .freq-card { background: linear-gradient(145deg, #151515, #222); padding: 20px; border-radius: 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.6); border: 1px solid #333; text-align: center; margin-bottom: 20px; position: relative; }
-    .freq-val { font-size: 3.2rem; font-weight: 800; color: #fff; text-shadow: 0 0 15px rgba(0, 230, 118, 0.4); font-feature-settings: "tnum"; line-height: 1; }
-    .unit { font-size: 1rem; color: #888; margin-top: 5px; }
-    .mode-badge { position: absolute; top: 20px; right: 20px; background: #333; padding: 4px 10px; border-radius: 8px; font-weight: bold; font-size: 0.8rem; color: var(--primary); }
-    .att-badge { position: absolute; top: 20px; left: 20px; background: #333; padding: 4px 10px; border-radius: 8px; font-weight: bold; font-size: 0.8rem; color: #ff9800; display: none; }
+    <style>
+        :root {
+            --bg-color: #050507;
+            --card-bg: rgba(30, 30, 35, 0.6);
+            --accent-color: #00ffc8;
+            --accent-dim: rgba(0, 255, 200, 0.1);
+            --danger-color: #ff3b30;
+            --text-main: #ffffff;
+            --text-sub: #8b9bb4;
+            --glass-border: 1px solid rgba(255, 255, 255, 0.08);
+            --radius: 16px;
+        }
 
-    /* Signal Meter */
-    .meter-box { margin-top: 20px; background: #000; padding: 10px; border-radius: 10px; }
-    .meter-bar-bg { height: 10px; background: #222; border-radius: 5px; overflow: hidden; position: relative; }
-    .meter-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2196f3, #00e676, #ff1744); transition: width 0.05s linear; }
-    .meter-threshold { position: absolute; top:0; bottom:0; width: 2px; background: #ffeb3b; z-index: 10; transition: left 0.1s; }
-    .meter-labels { display: flex; justify-content: space-between; font-size: 0.7rem; color: #666; margin-top: 4px; }
+        body {
+            background-color: var(--bg-color);
+            background-image: radial-gradient(circle at 50% 0%, #1a1f35 0%, var(--bg-color) 70%);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            -webkit-tap-highlight-color: transparent;
+        }
 
-    /* Controls */
-    .ctrl-group { background: var(--panel); padding: 15px; border-radius: 15px; margin-bottom: 15px; }
-    .slider-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-    input[type=range] { flex: 1; height: 30px; }
-    
-    .btn-row { display: flex; gap: 10px; margin-bottom: 10px; }
-    .btn { flex: 1; padding: 12px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; color: #fff; background: #333; transition: 0.2s; }
-    .btn:active { transform: scale(0.98); }
-    .btn.active { background: var(--primary); color: #000; }
-    .btn-rec { background: #d32f2f; }
-    .btn-rec.recording { background: #ff1744; animation: pulse 1.5s infinite; }
-    
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+        .app-container {
+            width: 100%;
+            max-width: 480px;
+            padding: 20px;
+            padding-bottom: 100px;
+            box-sizing: border-box;
+        }
 
-    /* Frequency Input */
-    .input-row { display: flex; gap: 10px; }
-    input[type="number"] { flex: 1; background: #222; border: 1px solid #444; color: #fff; padding: 12px; border-radius: 8px; font-size: 1.1rem; text-align: center; }
-    .btn-tune { background: #00897b; }
+        /* Glassmorphism Card */
+        .glass-panel {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: var(--glass-border);
+            border-radius: var(--radius);
+            padding: 20px;
+            margin-bottom: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
 
-    /* Start Button */
-    #startBtn { width: 100%; padding: 20px; font-size: 1.2rem; font-weight: bold; border-radius: 50px; background: var(--primary); color: #000; border: none; box-shadow: 0 4px 20px rgba(0, 230, 118, 0.4); margin-bottom: 20px; cursor: pointer; }
-    #startBtn.hidden { display: none; }
+        /* Frequency Display */
+        .freq-display {
+            text-align: center;
+            position: relative;
+            padding: 20px 0;
+        }
+        .freq-main {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 3.5rem;
+            font-weight: 700;
+            letter-spacing: -2px;
+            color: var(--text-main);
+            text-shadow: 0 0 20px var(--accent-dim);
+            line-height: 1;
+        }
+        .freq-unit {
+            color: var(--text-sub);
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-top: 4px;
+            letter-spacing: 2px;
+        }
+        .badges {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .badge {
+            font-size: 0.75rem;
+            padding: 4px 10px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.05);
+            color: var(--text-sub);
+            font-weight: 600;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        .badge.active {
+            background: var(--accent-dim);
+            color: var(--accent-color);
+            border-color: var(--accent-color);
+        }
 
-    /* Lists (Bookmarks/Recordings) */
-    .list-header { display: flex; justify-content: space-between; align-items: center; margin: 15px 0 5px; color: #888; font-size: 0.9rem; font-weight: bold; }
-    .list-item { background: var(--panel); border-bottom: 1px solid #333; padding: 12px; display: flex; justify-content: space-between; align-items: center; }
-    .list-item:first-child { border-top-left-radius: 10px; border-top-right-radius: 10px; }
-    .list-item:last-child { border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; border-bottom: none; }
-    .item-info div:first-child { font-weight: bold; color: #fff; }
-    .item-info div:last-child { font-size: 0.8rem; color: #888; }
-    .item-actions button { padding: 5px 10px; border-radius: 4px; border: none; margin-left: 5px; cursor: pointer; font-size: 0.8rem; }
-    .act-del { background: #b71c1c; color: #fff; }
-    .act-dl { background: #00897b; color: #fff; text-decoration: none; padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; margin-left: 5px; }
+        /* Signal Meter */
+        .meter-container {
+            margin-top: 20px;
+            position: relative;
+        }
+        .meter-track {
+            height: 6px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+        .meter-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #2196f3, var(--accent-color));
+            transition: width 0.08s ease-out;
+            box-shadow: 0 0 10px var(--accent-color);
+        }
+        .sq-marker {
+            position: absolute;
+            top: -4px;
+            bottom: -4px;
+            width: 2px;
+            background: #ffd700;
+            z-index: 2;
+            transition: left 0.1s;
+            box-shadow: 0 0 5px #ffd700;
+        }
+        .sq-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 12px;
+        }
+        .sq-icon { color: var(--text-sub); font-size: 1.2rem; }
+        
+        /* Modern Slider */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 18px;
+            width: 18px;
+            border-radius: 50%;
+            background: #fff;
+            cursor: pointer;
+            margin-top: -7px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: rgba(255,255,255,0.15);
+            border-radius: 2px;
+        }
 
-    /* Modal */
-    .modal-overlay { position: fixed; top:0; left:0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px); z-index: 1000; display: none; justify-content: center; align-items: center; }
-    .modal { background: #1e1e1e; padding: 25px; border-radius: 15px; width: 85%; max-width: 300px; text-align: center; border: 1px solid #333; }
-    .modal h3 { margin-top: 0; color: #fff; }
-    .modal input { width: 100%; margin-bottom: 15px; box-sizing: border-box; }
-</style>
+        /* Control Grid */
+        .control-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .btn {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.05);
+            color: var(--text-main);
+            padding: 14px;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .btn:active { transform: scale(0.96); }
+        .btn.active {
+            background: var(--accent-dim);
+            border-color: var(--accent-color);
+            color: var(--accent-color);
+        }
+        .btn-tune {
+            grid-column: span 2;
+            background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05));
+            font-size: 1rem;
+        }
+        .btn-rec {
+            grid-column: span 2;
+            background: rgba(255, 59, 48, 0.1);
+            color: var(--danger-color);
+            border-color: rgba(255, 59, 48, 0.3);
+        }
+        .btn-rec.recording {
+            background: var(--danger-color);
+            color: #fff;
+            box-shadow: 0 0 20px rgba(255, 59, 48, 0.4);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+
+        /* Start Overlay */
+        .start-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(5, 5, 7, 0.95);
+            backdrop-filter: blur(10px);
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 0.3s;
+        }
+        .start-btn {
+            background: var(--accent-color);
+            color: #000;
+            border: none;
+            padding: 18px 40px;
+            border-radius: 50px;
+            font-size: 1.2rem;
+            font-weight: 800;
+            box-shadow: 0 0 30px var(--accent-color);
+            cursor: pointer;
+            letter-spacing: 1px;
+        }
+        .start-btn:active { transform: scale(0.95); }
+
+        /* Input Modal */
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(8px);
+            z-index: 1000;
+            display: none;
+            justify-content: center;
+            align-items: flex-end; /* Bottom sheet on mobile */
+        }
+        .modal-card {
+            background: #1a1b20;
+            width: 100%;
+            max-width: 480px;
+            border-top-left-radius: 24px;
+            border-top-right-radius: 24px;
+            padding: 30px;
+            box-sizing: border-box;
+            box-shadow: 0 -10px 40px rgba(0,0,0,0.5);
+            animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+
+        .modal-title { font-size: 1.2rem; font-weight: 700; margin-bottom: 20px; color: #fff; }
+        .input-group { position: relative; margin-bottom: 20px; }
+        .modern-input {
+            width: 100%;
+            background: #27282e;
+            border: 2px solid transparent;
+            padding: 16px;
+            border-radius: 12px;
+            color: #fff;
+            font-size: 1.2rem;
+            font-family: 'Inter', sans-serif;
+            box-sizing: border-box;
+            outline: none;
+            transition: 0.2s;
+        }
+        .modern-input:focus { border-color: var(--accent-color); background: #2d2e36; }
+        .modal-actions { display: flex; gap: 12px; }
+        .btn-primary { background: var(--accent-color); color: #000; flex: 1; border:none; }
+        .btn-secondary { background: #333; color: #fff; flex: 1; border:none; }
+
+        /* Lists */
+        .section-title {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-sub);
+            margin: 24px 0 8px 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .list-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .item-main { display: flex; flex-direction: column; }
+        .item-title { font-weight: 600; color: #fff; font-size: 1rem; }
+        .item-sub { color: var(--text-sub); font-size: 0.8rem; margin-top: 2px; }
+        .icon-btn {
+            background: transparent; border: none; color: var(--text-sub);
+            padding: 8px; cursor: pointer; border-radius: 50%;
+        }
+        .icon-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
+    </style>
 </head>
 <body>
-    <div class="container">
-        <div style="font-size:0.8rem; color:#666; margin-bottom:10px; text-align:center;" id="statusText">Disconnected</div>
 
-        <button id="startBtn" onclick="startAudio()">START MONITOR</button>
-
-        <div class="freq-card">
-            <span class="mode-badge" id="modeLabel">AM</span>
-            <span class="att-badge" id="attBadge">ATT</span>
-            <div class="freq-val" id="freqLabel">---.---</div>
-            <div class="unit">MHz</div>
-            
-            <div class="meter-box">
-                <div class="meter-labels"><span>SQL</span><span id="sqVal">10</span></div>
-                <div class="meter-bar-bg">
-                    <div class="meter-bar-fill" id="rssiBar"></div>
-                    <div class="meter-threshold" id="sqMarker" style="left: 10%"></div>
-                </div>
-            </div>
-            
-            <div class="slider-row">
-                <span style="font-size:0.8rem; color:#888;">OPEN</span>
-                <input type="range" id="sqRange" min="0" max="60" value="10" oninput="updateSq(this.value)" onchange="sendSq(this.value)">
-                <span style="font-size:0.8rem; color:#888;">TIGHT</span>
-            </div>
-        </div>
-
-        <div class="ctrl-group">
-            <div class="btn-row">
-                <button class="btn active" id="btnAM" onclick="setMode('AM')">AM</button>
-                <button class="btn" id="btnFM" onclick="setMode('FM')">FM</button>
-            </div>
-            <div class="btn-row">
-                <button class="btn active" id="attOff" onclick="setAtt('off')">NO ATT</button>
-                <button class="btn" id="attWeak" onclick="setAtt('weak')">WEAK</button>
-                <button class="btn" id="attStrong" onclick="setAtt('strong')">STRONG</button>
-            </div>
-            <div class="input-row">
-                <input type="number" id="tuneFreq" placeholder="Freq (MHz)" step="0.001">
-                <button class="btn btn-tune" onclick="openAuthModal()">TUNE</button>
-            </div>
-        </div>
-
-        <div class="list-header">
-            <span>BOOKMARKS</span>
-            <button class="btn" style="padding:4px 10px; font-size:0.8rem;" onclick="addBookmark()">+ ADD</button>
-        </div>
-        <div id="bmList"></div>
-
-        <div class="list-header">
-            <span>RECORDINGS</span>
-            <button class="btn btn-rec" id="recBtn" style="padding:4px 10px; font-size:0.8rem;" onclick="toggleRec()">REC</button>
-        </div>
-        <div id="recList"></div>
+    <div class="start-overlay" id="startOverlay">
+        <div style="font-size: 3rem; margin-bottom: 20px;">📡</div>
+        <button class="start-btn" onclick="initApp()">CONNECT SYSTEM</button>
+        <p style="color: #666; margin-top: 20px; font-size: 0.8rem;">Ready to monitor airwaves</p>
     </div>
 
-    <div class="modal-overlay" id="authModal">
-        <div class="modal">
-            <h3>Enter Password</h3>
-            <input type="password" id="authPass" placeholder="Password">
-            <div class="btn-row">
-                <button class="btn" onclick="closeAuthModal()">Cancel</button>
-                <button class="btn active" onclick="doTune()">Tune</button>
+    <div class="app-container">
+        <div class="glass-panel">
+            <div class="badges">
+                <span class="badge" id="modeBadge">AM</span>
+                <span class="badge" id="attBadge" style="display:none">ATT</span>
+                <span class="badge" id="recBadge" style="display:none; color:var(--danger-color); border-color:var(--danger-color)">REC</span>
+            </div>
+
+            <div class="freq-display">
+                <div class="freq-main" id="freqVal">---.---</div>
+                <div class="freq-unit">MEGAHERTZ</div>
+            </div>
+
+            <div class="meter-container">
+                <div class="meter-track">
+                    <div class="meter-bar" id="rssiBar"></div>
+                    <div class="sq-marker" id="sqMarker" style="left: 10%"></div>
+                </div>
+                <div class="sq-controls">
+                    <span class="material-symbols-outlined sq-icon">graphic_eq</span>
+                    <input type="range" id="sqRange" min="0" max="60" value="10" oninput="ui.updateSq(this.value)" onchange="ws.sendSq(this.value)">
+                </div>
+            </div>
+        </div>
+
+        <div class="control-grid">
+            <button class="btn btn-tune" onclick="ui.modal('tune')">
+                <span class="material-symbols-outlined">dialpad</span> TUNE FREQUENCY
+            </button>
+            <button class="btn active" id="btnAM" onclick="ws.setMode('AM')">AM</button>
+            <button class="btn" id="btnFM" onclick="ws.setMode('FM')">FM</button>
+            <button class="btn active" id="attOff" onclick="ws.setAtt('off')">NO ATT</button>
+            <button class="btn" id="attWeak" onclick="ws.setAtt('weak')">WEAK</button>
+            <button class="btn btn-rec" id="recBtn" onclick="ws.toggleRec()">
+                <span class="material-symbols-outlined">fiber_manual_record</span> REC
+            </button>
+        </div>
+
+        <div class="section-title">
+            Channels
+            <button class="icon-btn" onclick="ws.addBookmark()">
+                <span class="material-symbols-outlined">add</span>
+            </button>
+        </div>
+        <div class="glass-panel" id="bmList"></div>
+
+        <div class="section-title">Recorded Files</div>
+        <div class="glass-panel" id="recList"></div>
+    </div>
+
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal-card">
+            <div class="modal-title" id="modalTitle">Set Frequency</div>
+            
+            <div class="input-group" id="freqInputGroup">
+                <input type="number" inputmode="decimal" class="modern-input" id="tuneInput" placeholder="128.800" step="0.001">
+            </div>
+            
+            <div class="input-group">
+                <input type="password" inputmode="numeric" class="modern-input" id="authInput" placeholder="Admin Password">
+            </div>
+
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="ui.closeModal()">CANCEL</button>
+                <button class="btn btn-primary" onclick="ws.tune()">EXECUTE</button>
             </div>
         </div>
     </div>
 
 <script>
-    let ws;
+    // System Logic
     let audioCtx;
+    let wsConn;
     let nextTime = 0;
     const SAMPLE_RATE = 24000;
     
-    // UI Elements
-    const els = {
-        freq: document.getElementById('freqLabel'),
-        mode: document.getElementById('modeLabel'),
-        attBadge: document.getElementById('attBadge'),
-        status: document.getElementById('statusText'),
-        rssiBar: document.getElementById('rssiBar'),
-        sqMarker: document.getElementById('sqMarker'),
-        recBtn: document.getElementById('recBtn'),
-        bmList: document.getElementById('bmList'),
-        recList: document.getElementById('recList'),
-        tuneFreq: document.getElementById('tuneFreq'),
-        startBtn: document.getElementById('startBtn')
-    };
+    // State
+    const state = { freq: 0, mode: 'AM', att: 'off', isRec: false };
 
-    let state = { freq: 0, mode: 'AM', att: 'off', isRec: false };
-
-    function startAudio() {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
-        // Android/iOS: Resume context on user gesture
-        if (audioCtx.state === 'suspended') audioCtx.resume();
-        
-        // Keep-alive oscillator for mobile background playback
-        const oscillator = audioCtx.createOscillator();
-        const gainNode = audioCtx.createGain();
-        oscillator.connect(gainNode);
-        gainNode.connect(audioCtx.destination);
-        oscillator.frequency.value = 20; 
-        gainNode.gain.value = 0.001; // Inaudible
-        oscillator.start();
-
-        els.startBtn.classList.add('hidden');
-        connectWs();
-    }
-
-    function connectWs() {
-        ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host);
-        ws.binaryType = 'arraybuffer';
-        
-        ws.onopen = () => els.status.innerText = "Connected";
-        ws.onclose = () => {
-            els.status.innerText = "Disconnected... Reconnecting";
-            setTimeout(connectWs, 3000);
-        };
-        
-        ws.onmessage = (e) => {
-            if (typeof e.data === 'string') {
-                handleJson(JSON.parse(e.data));
-            } else {
-                handleAudio(e.data);
-            }
-        };
-    }
-
-    function handleJson(msg) {
-        if (msg.type === 'status_update') {
+    // UI Controller
+    const ui = {
+        els: {
+            freq: document.getElementById('freqVal'),
+            rssi: document.getElementById('rssiBar'),
+            sqMarker: document.getElementById('sqMarker'),
+            modal: document.getElementById('modalOverlay'),
+            bmList: document.getElementById('bmList'),
+            recList: document.getElementById('recList')
+        },
+        updateStatus(msg) {
             state.freq = msg.freq;
             state.mode = msg.mode;
             state.att = msg.att;
             state.isRec = msg.isRecording;
 
-            els.freq.innerText = (msg.freq / 1000000).toFixed(3);
-            els.mode.innerText = msg.mode;
+            this.els.freq.innerText = (msg.freq / 1e6).toFixed(3);
             
-            // UI Sync
-            document.getElementById('sqRange').value = msg.squelch;
-            updateSq(msg.squelch);
+            // Badges
+            document.getElementById('modeBadge').innerText = msg.mode;
+            const attBadge = document.getElementById('attBadge');
+            if (msg.att !== 'off') {
+                attBadge.style.display = 'inline-block';
+                attBadge.innerText = 'ATT ' + msg.att.toUpperCase();
+                attBadge.classList.add('active');
+            } else {
+                attBadge.style.display = 'none';
+            }
+            document.getElementById('recBadge').style.display = msg.isRecording ? 'inline-block' : 'none';
 
-            // Mode Buttons
+            // Buttons
             document.getElementById('btnAM').className = 'btn ' + (msg.mode==='AM'?'active':'');
             document.getElementById('btnFM').className = 'btn ' + (msg.mode==='FM'?'active':'');
-
-            // ATT Buttons
-            ['off','weak','strong'].forEach(t => {
-                document.getElementById('att'+(t.charAt(0).toUpperCase()+t.slice(1))).className = 'btn ' + (msg.att===t?'active':'');
-            });
-            els.attBadge.style.display = (msg.att !== 'off') ? 'block' : 'none';
-            els.attBadge.innerText = 'ATT ' + msg.att.toUpperCase();
-
-            // Rec Button
-            els.recBtn.className = 'btn btn-rec ' + (msg.isRecording ? 'recording' : '');
-            els.recBtn.innerText = msg.isRecording ? 'STOP REC' : 'REC';
-
-        } else if (msg.type === 'bookmarks') {
-            renderBookmarks(msg.data);
-        } else if (msg.type === 'recordings') {
-            renderRecordings(msg.data);
-        } else if (msg.type === 'error') {
-            alert(msg.msg);
+            document.getElementById('recBtn').className = 'btn btn-rec ' + (msg.isRecording?'recording':'');
+            
+            // Squelch
+            document.getElementById('sqRange').value = msg.squelch;
+            this.updateSq(msg.squelch);
+        },
+        updateSq(val) { this.els.sqMarker.style.left = ((val/60)*100) + '%'; },
+        modal(type) {
+            this.els.modal.style.display = 'flex';
+            if(type === 'tune') {
+                document.getElementById('tuneInput').value = (state.freq / 1e6).toFixed(3);
+                document.getElementById('tuneInput').focus();
+            }
+        },
+        closeModal() { this.els.modal.style.display = 'none'; document.getElementById('authInput').value=''; },
+        renderBM(list) {
+            this.els.bmList.innerHTML = list.map(b => \`
+                <div class="list-item" onclick="ws.tuneDirect(\${b.freq}, '\${b.mode}')">
+                    <div class="item-main">
+                        <div class="item-title">\${b.title}</div>
+                        <div class="item-sub">\${(b.freq/1e6).toFixed(3)} MHz \${b.mode}</div>
+                    </div>
+                    <button class="icon-btn" onclick="event.stopPropagation(); ws.delBm('\${b.id}')">
+                        <span class="material-symbols-outlined">delete</span>
+                    </button>
+                </div>
+            \`).join('');
+        },
+        renderRec(list) {
+            this.els.recList.innerHTML = list.map(f => \`
+                <div class="list-item">
+                    <div class="item-main">
+                        <div class="item-title">\${f.name.split('_')[2] || f.name}</div>
+                        <div class="item-sub">\${(f.size/1024/1024).toFixed(2)} MB</div>
+                    </div>
+                    <div>
+                        <a href="/download/\${f.name}" class="icon-btn" download style="text-decoration:none; color:var(--text-sub)">
+                            <span class="material-symbols-outlined">download</span>
+                        </a>
+                        <button class="icon-btn" onclick="ws.delRec('\${f.name}')">
+                            <span class="material-symbols-outlined">delete</span>
+                        </button>
+                    </div>
+                </div>
+            \`).join('');
         }
+    };
+
+    // WebSocket Controller
+    const ws = {
+        send(obj) { if(wsConn && wsConn.readyState===1) wsConn.send(JSON.stringify(obj)); },
+        sendSq(val) { this.send({type:'set_squelch', val: parseInt(val)}); },
+        setMode(m) { state.mode = m; this.tune(true); }, // Just update mode flag for next tune or force tune? Better force tune with current freq
+        setAtt(a) { this.send({type:'set_att', att: a}); },
+        toggleRec() { this.send({type: state.isRec ? 'stop_recording' : 'start_recording'}); },
+        tune(skipInput = false) {
+            const pass = document.getElementById('authInput').value;
+            let freq = state.freq;
+            if (!skipInput) {
+                const val = parseFloat(document.getElementById('tuneInput').value);
+                if(val) freq = Math.floor(val * 1e6);
+            }
+            this.send({ type:'auth_tune', password: pass, freq: freq, mode: state.mode });
+            ui.closeModal();
+        },
+        tuneDirect(freq, mode) {
+            state.mode = mode;
+            document.getElementById('tuneInput').value = freq/1e6;
+            ui.modal('tune');
+        },
+        addBookmark() {
+            const t = prompt("Channel Name");
+            if(t) this.send({type:'add_bookmark', data:{title:t, freq:state.freq, mode:state.mode}});
+        },
+        delBm(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
+        delRec(fn) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:fn}); }
+    };
+
+    function initApp() {
+        // Audio Init
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+        if(audioCtx.state === 'suspended') audioCtx.resume();
+        
+        // Silent Oscillator for Mobile Wake Lock
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.frequency.value=10; gain.gain.value=0.001; osc.start();
+
+        // UI Transition
+        document.getElementById('startOverlay').style.opacity = '0';
+        setTimeout(() => document.getElementById('startOverlay').style.display = 'none', 300);
+
+        // Connect
+        connect();
     }
 
-    function handleAudio(buffer) {
-        if (!audioCtx) return;
+    function connect() {
+        wsConn = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host);
+        wsConn.binaryType = 'arraybuffer';
+        wsConn.onmessage = e => {
+            if(typeof e.data === 'string') {
+                const msg = JSON.parse(e.data);
+                if(msg.type==='status_update') ui.updateStatus(msg);
+                else if(msg.type==='bookmarks') ui.renderBM(msg.data);
+                else if(msg.type==='recordings') ui.renderRec(msg.data);
+                else if(msg.type==='error') alert(msg.msg);
+            } else {
+                playAudio(e.data);
+            }
+        };
+        wsConn.onclose = () => setTimeout(connect, 3000);
+    }
 
-        // Parse Header (First 2 bytes = Int16 RSSI)
-        const view = new Int16Array(buffer);
+    function playAudio(buf) {
+        if(!audioCtx) return;
+        const view = new Int16Array(buf);
         const rssi = view[0];
-        const pcmData = view.subarray(1); // The rest is audio
+        const audio = new Float32Array(view.length-1);
+        for(let i=0; i<audio.length; i++) audio[i] = view[i+1]/32768.0;
 
-        // Update Meter
-        els.rssiBar.style.width = rssi + '%';
+        // Visual
+        const pct = (rssi/200)*100; // rough scale
+        ui.els.rssi.style.width = Math.min(100, pct) + '%';
+        ui.els.rssi.style.boxShadow = \`0 0 \${pct/5}px var(--accent-color)\`;
 
-        // Play Audio
-        const float32 = new Float32Array(pcmData.length);
-        for(let i=0; i<pcmData.length; i++) float32[i] = pcmData[i] / 32768.0;
-
-        const audioBuf = audioCtx.createBuffer(1, float32.length, SAMPLE_RATE);
-        audioBuf.getChannelData(0).set(float32);
-        
-        const src = audioCtx.createBufferSource();
-        src.buffer = audioBuf;
-        src.connect(audioCtx.destination);
+        const b = audioCtx.createBuffer(1, audio.length, SAMPLE_RATE);
+        b.getChannelData(0).set(audio);
+        const s = audioCtx.createBufferSource();
+        s.buffer = b; s.connect(audioCtx.destination);
         
         const now = audioCtx.currentTime;
-        // Jitter buffer logic
-        if (nextTime < now) nextTime = now + 0.05;
-        src.start(nextTime);
-        nextTime += audioBuf.duration;
+        if(nextTime < now) nextTime = now + 0.04;
+        s.start(nextTime);
+        nextTime += b.duration;
     }
-
-    // Commands
-    function updateSq(val) {
-        document.getElementById('sqVal').innerText = val;
-        els.sqMarker.style.left = val + '%';
-    }
-    function sendSq(val) {
-        ws.send(JSON.stringify({ type: 'set_squelch', val: parseInt(val) }));
-    }
-    function setMode(m) { state.mode = m; } // Wait for tune to apply
-    function setAtt(a) { 
-        ws.send(JSON.stringify({ type: 'set_att', att: a }));
-    }
-    function toggleRec() {
-        ws.send(JSON.stringify({ type: state.isRec ? 'stop_recording' : 'start_recording' }));
-    }
-
-    // Tuning Flow
-    function openAuthModal() { document.getElementById('authModal').style.display = 'flex'; }
-    function closeAuthModal() { document.getElementById('authModal').style.display = 'none'; }
-    function doTune() {
-        const pass = document.getElementById('authPass').value;
-        let freq = parseFloat(els.tuneFreq.value);
-        if(!freq) freq = state.freq / 1000000;
-        
-        ws.send(JSON.stringify({
-            type: 'auth_tune',
-            password: pass,
-            freq: Math.floor(freq * 1000000),
-            mode: state.mode
-        }));
-        closeAuthModal();
-        document.getElementById('authPass').value = '';
-    }
-
-    // Lists
-    function renderBookmarks(list) {
-        els.bmList.innerHTML = list.map(b => \`
-            <div class="list-item" onclick="tuneTo(\${b.freq}, '\${b.mode}')">
-                <div class="item-info">
-                    <div>\${b.title}</div>
-                    <div>\${(b.freq/1e6).toFixed(3)} MHz \${b.mode}</div>
-                </div>
-                <div class="item-actions">
-                    <button class="act-del" onclick="event.stopPropagation(); delBm('\${b.id}')">DEL</button>
-                </div>
-            </div>
-        \`).join('');
-    }
-
-    function addBookmark() {
-        const title = prompt("Station Name:");
-        if(!title) return;
-        ws.send(JSON.stringify({
-            type: 'add_bookmark',
-            data: { title, freq: state.freq, mode: state.mode }
-        }));
-    }
-
-    function delBm(id) {
-        if(confirm("Delete?")) ws.send(JSON.stringify({ type: 'delete_bookmark', id }));
-    }
-
-    function tuneTo(freq, mode) {
-        els.tuneFreq.value = freq / 1000000;
-        state.mode = mode;
-        openAuthModal();
-    }
-
-    function renderRecordings(list) {
-        els.recList.innerHTML = list.map(f => \`
-            <div class="list-item">
-                <div class="item-info">
-                    <div>\${f.name}</div>
-                    <div>\${(f.size/1024/1024).toFixed(2)} MB</div>
-                </div>
-                <div class="item-actions">
-                    <a href="/download/\${f.name}" class="act-dl" download>DL</a>
-                    <button class="act-del" onclick="delRec('\${f.name}')">DEL</button>
-                </div>
-            </div>
-        \`).join('');
-    }
-
-    function delRec(fname) {
-        if(confirm("Delete File?")) ws.send(JSON.stringify({ type: 'delete_recording', filename: fname }));
-    }
-
 </script>
 </body>
 </html>
