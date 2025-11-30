@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Visual Squelch UI
+ * Modern Web SDR - ATT MID Adjusted (Gain 10)
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -124,10 +124,11 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    let gainVal = '48';
-    if (att === 'weak') gainVal = '35';
-    if (att === 'mid')  gainVal = '18';
-    if (att === 'strong') gainVal = '0';
+    // Attenuator Logic (Gain Control)
+    let gainVal = '48'; // OFF = Max
+    if (att === 'weak') gainVal = '35';   // WEAK
+    if (att === 'mid')  gainVal = '10';   // MID (Changed to 10)
+    if (att === 'strong') gainVal = '0';  // STRONG
 
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
     console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
@@ -140,10 +141,9 @@ function startRadio(freq, mode, att) {
 function handleAudio(raw) {
     const res = dsp.process(raw, { squelchThreshold });
     const head = new Int16Array(1); head[0] = res.rssi;
-    // Embed Squelch Status (Open/Close) in the 2nd Int16 for UI feedback
+    // Embed Squelch Status
     const statusWord = res.isOpen ? 1 : 0; 
-    // Create a slightly larger buffer to hold status
-    const combo = Buffer.alloc(raw.length + 4); // +4 bytes for RSSI(2) and Status(2)
+    const combo = Buffer.alloc(raw.length + 4); 
     combo.writeInt16LE(res.rssi, 0);
     combo.writeInt16LE(statusWord, 2);
     res.buffer.copy(combo, 4);
@@ -243,7 +243,7 @@ server.listen(CONFIG.webPort, () => {
 });
 
 // ==========================================
-// Frontend (Visual Squelch)
+// Frontend
 // ==========================================
 const htmlContent = `
 <!DOCTYPE html>
@@ -265,12 +265,10 @@ const htmlContent = `
     .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); }
     .badge-sql.open { background: var(--acc-dim); color: var(--acc); border-color: var(--acc); }
     
-    /* Visual Squelch Meter */
     .meter-wrap { position: relative; height: 36px; margin-top: 20px; display: flex; align-items: center; }
     .meter-bg { position: absolute; left: 0; right: 0; top: 12px; bottom: 12px; background: rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; }
     .meter-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2196f3, var(--acc)); transition: width 0.05s ease-out; }
     
-    /* Range Input Overlay */
     input[type=range] { 
         position: absolute; left: 0; width: 100%; height: 100%; 
         -webkit-appearance: none; background: transparent; margin: 0; z-index: 10; cursor: pointer;
@@ -278,7 +276,7 @@ const htmlContent = `
     input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 100%; background: transparent; }
     input[type=range]::-webkit-slider-thumb { 
         -webkit-appearance: none; 
-        height: 36px; width: 4px; /* The yellow bar */
+        height: 36px; width: 4px; 
         background: #ffd700; border-radius: 2px;
         box-shadow: 0 0 10px #ffd700;
         margin-top: 0px; 
@@ -407,7 +405,7 @@ const htmlContent = `
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             document.getElementById('inpSq').value = m.squelch;
         },
-        updSq(v) { /* Handled via CSS slider natively now */ },
+        updSq(v) { /* handled by css */ },
         modal(show) {
             document.getElementById('modal').style.display = show?'flex':'none';
             if(show) { 
@@ -533,12 +531,10 @@ const htmlContent = `
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
         audio(b) {
             if(!audioCtx) return;
-            // Decode combined buffer [RSSI(2), SQL(2), AUDIO...]
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
             
-            // Visual Update
             window.ui.els.rssi.style.width = Math.min(100, (rssi/200)*100)+'%';
             const bdgSql = document.getElementById('bdgSql');
             if (sqlOpen) {
@@ -549,9 +545,8 @@ const htmlContent = `
                 bdgSql.className = 'badge badge-sql';
             }
 
-            // Audio Playback
-            const f = new Float32Array((b.byteLength - 4) / 2); // 16bit samples
-            const s16 = new Int16Array(b, 4); // Offset 4 bytes
+            const f = new Float32Array((b.byteLength - 4) / 2);
+            const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
             
             const buf = audioCtx.createBuffer(1, f.length, 24000);
