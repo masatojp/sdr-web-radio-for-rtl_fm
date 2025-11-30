@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Horizontal ATT UI
+ * Modern Web SDR - 4-Step Attenuator
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -75,9 +75,11 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
+            // HPF
             let raw = s; s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; this.lastIn = raw; this.lastOut = s;
             sumSq += s * s;
             
+            // AGC
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.6 / (this.agcPeak + 0.05);
             if (g > 15.0) g = 15.0; if (g < 1.0) g = 1.0;
@@ -121,12 +123,14 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    let gainVal = '48';
-    if (att === 'weak') gainVal = '20';
-    if (att === 'strong') gainVal = '0';
+    // Attenuator Logic (Gain Control)
+    let gainVal = '48'; // OFF = Max
+    if (att === 'weak') gainVal = '35';   // WEAK = High-Mid (For slightly noisy signals)
+    if (att === 'mid')  gainVal = '18';   // MID  = Low-Mid (For local signals)
+    if (att === 'strong') gainVal = '0';  // STRONG = Min (Strong interference)
 
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
-    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}`);
+    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
     
     rtlProcess = spawn('rtl_fm', args);
     rtlProcess.stdout.on('data', (c) => handleAudio(c));
@@ -258,8 +262,8 @@ const htmlContent = `
     .mark { position: absolute; top:0; bottom:0; width: 2px; background: #ffd700; z-index: 2; transition: left 0.1s; }
     
     .ctrls { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
-    .btn-row { display: flex; gap: 10px; width: 100%; }
-    .btn { flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--txt); padding: 14px; border-radius: 12px; font-weight: 600; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 6px; font-size: 0.8rem; transition: background 0.1s; white-space: nowrap; }
+    .btn-row { display: flex; gap: 8px; width: 100%; }
+    .btn { flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--txt); padding: 12px 8px; border-radius: 12px; font-weight: 600; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 6px; font-size: 0.75rem; transition: background 0.1s; white-space: nowrap; }
     .btn:active { background: rgba(255,255,255,0.15); transform: scale(0.98); }
     .btn.active { background: var(--acc-dim); border-color: var(--acc); color: var(--acc); }
     
@@ -323,8 +327,9 @@ const htmlContent = `
             </div>
             <div class="btn-row">
                 <button class="btn active" id="attOff" onclick="window.ws.setAtt('off')">NO ATT</button>
-                <button class="btn" id="attWeak" onclick="window.ws.setAtt('weak')">ATT WEAK</button>
-                <button class="btn" id="attStrong" onclick="window.ws.setAtt('strong')">ATT STRONG</button>
+                <button class="btn" id="attWeak" onclick="window.ws.setAtt('weak')">WEAK</button>
+                <button class="btn" id="attMid" onclick="window.ws.setAtt('mid')">MID</button>
+                <button class="btn" id="attStrong" onclick="window.ws.setAtt('strong')">STRONG</button>
             </div>
         </div>
 
@@ -374,9 +379,10 @@ const htmlContent = `
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
             document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
             
-            // ATT Buttons State
+            // ATT Buttons State (4-Steps)
             document.getElementById('attOff').className = 'btn '+(m.att==='off'?'active':'');
             document.getElementById('attWeak').className = 'btn '+(m.att==='weak'?'active':'');
+            document.getElementById('attMid').className = 'btn '+(m.att==='mid'?'active':'');
             document.getElementById('attStrong').className = 'btn '+(m.att==='strong'?'active':'');
             
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
