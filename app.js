@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Discord 401 Fix Edition
+ * Modern Web SDR - Background Playback & Instant Start
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -33,74 +33,40 @@ const CONFIG = {
 if (!fs.existsSync(CONFIG.recordingsPath)) fs.mkdirSync(CONFIG.recordingsPath);
 
 // ==========================================
-// Discord Notification Function (Fixed)
+// Discord Notification
 // ==========================================
 function sendDiscordNotification() {
-    // 1. 前後の空白を削除 (.trim)
     const rawUrl = process.env.DISCORD_WEBHOOK_URL || "";
     const webhookUrl = rawUrl.trim();
 
-    if (!webhookUrl || !webhookUrl.startsWith("https://")) {
-        console.log("[System] Discord Webhook URL not set or invalid. Skipping.");
-        return;
-    }
-
-    // デバッグログ: URLが正しく読めているか確認 (セキュリティのため一部隠す)
-    const mask = webhookUrl.length > 50 ? webhookUrl.substring(0, 40) + "..." : "Short URL";
-    console.log(`[System] Sending Notification to: ${mask}`);
+    if (!webhookUrl || !webhookUrl.startsWith("https://")) return;
 
     const payload = JSON.stringify({
         username: "SDR Commander",
-        avatar_url: "https://cdn-icons-png.flaticon.com/512/3659/3659738.png",
         embeds: [{
             title: "📡 System Started",
-            description: "SDR Web Receiver is now online.",
+            description: "SDR Web Receiver is online.",
             color: 5814783,
             fields: [
-                { name: "Port", value: CONFIG.webPort.toString(), inline: true },
                 { name: "Initial Freq", value: `${(CONFIG.initialFreq/1e6).toFixed(3)} MHz`, inline: true },
                 { name: "Mode", value: CONFIG.initialMode, inline: true }
             ],
-            footer: { text: "Node.js SDR Controller" },
             timestamp: new Date().toISOString()
         }]
     });
 
     try {
         const urlObj = new URL(webhookUrl);
-        const options = {
+        const req = https.request({
             hostname: urlObj.hostname,
             path: urlObj.pathname + urlObj.search,
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(payload),
-                'User-Agent': 'NodeSDR/1.0' // User-Agentを追加
-            }
-        };
-
-        const req = https.request(options, (res) => {
-            let responseData = '';
-            res.on('data', (chunk) => { responseData += chunk; });
-            res.on('end', () => {
-                if (res.statusCode >= 200 && res.statusCode < 300) {
-                    console.log("[System] Discord Notification Sent Successfully.");
-                } else {
-                    console.error(`[System] Discord Error: Status ${res.statusCode}`);
-                    console.error(`[System] Response: ${responseData}`); // エラー内容を表示
-                }
-            });
-        });
-
-        req.on('error', (e) => {
-            console.error(`[System] Discord Request Failed: ${e.message}`);
-        });
-
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+        }, () => {});
+        req.on('error', () => {});
         req.write(payload);
         req.end();
-    } catch (e) {
-        console.error(`[System] URL Parse Error: ${e.message}`);
-    }
+    } catch (e) {}
 }
 
 // ==========================================
@@ -166,7 +132,6 @@ class AudioDSP {
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.8 + rms * 0.2;
 
-        // Instant Squelch Logic
         const open = Math.max(0.005, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -197,14 +162,13 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // Attenuator Logic (Gain Control)
-    let gainVal = '48'; // OFF = Max
-    if (att === 'weak') gainVal = '35';   // WEAK
-    if (att === 'mid')  gainVal = '10';   // MID
-    if (att === 'strong') gainVal = '0';  // STRONG
+    let gainVal = '48';
+    if (att === 'weak') gainVal = '35';
+    if (att === 'mid')  gainVal = '10';
+    if (att === 'strong') gainVal = '0';
 
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
-    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
+    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}`);
     
     rtlProcess = spawn('rtl_fm', args);
     rtlProcess.stdout.on('data', (c) => handleAudio(c));
@@ -303,8 +267,17 @@ wss.on('connection', ws => {
             else if (c.type === 'start_recording') startRec();
             else if (c.type === 'stop_recording') stopRec();
             else if (c.type === 'delete_recording') { fs.unlinkSync(path.join(CONFIG.recordingsPath, c.filename)); broadcastRecordings(); }
-            else if (c.type === 'add_bookmark') { c.data.id = Date.now().toString(); bookmarks.push(c.data); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
-            else if (c.type === 'delete_bookmark') { bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
+            else if (c.type === 'add_bookmark') { 
+                c.data.id = Date.now().toString(); 
+                bookmarks.push(c.data); 
+                saveData(); 
+                ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
+            }
+            else if (c.type === 'delete_bookmark') { 
+                bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); 
+                saveData(); 
+                ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
+            }
         } catch(e){}
     });
 });
@@ -312,7 +285,7 @@ wss.on('connection', ws => {
 server.listen(CONFIG.webPort, () => {
     console.log(`[System] Interface Ready: http://localhost:${CONFIG.webPort}`);
     startRadio(CONFIG.initialFreq, CONFIG.initialMode, 'off');
-    sendDiscordNotification(); // Notify on startup
+    sendDiscordNotification();
 });
 
 // ==========================================
@@ -383,17 +356,9 @@ const htmlContent = `
     @keyframes up { from{transform:translateY(100%)}to{transform:translateY(0)} }
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
-    
-    .start-ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:#050507; z-index: 2000; display:flex; justify-content:center; align-items:center; flex-direction:column; transition: opacity 0.3s; }
-    .big-btn { background: var(--acc); color: #000; border: none; padding: 18px 40px; border-radius: 50px; font-size: 1.2rem; font-weight: 800; box-shadow: 0 0 30px var(--acc); cursor: pointer; }
 </style>
 </head>
 <body>
-    <div class="start-ovl" id="startScreen">
-        <div style="font-size:3rem; margin-bottom:20px;">📡</div>
-        <button class="big-btn" onclick="window.ui.init()">CONNECT SYSTEM</button>
-    </div>
-
     <div class="app">
         <div class="panel">
             <div class="badges">
@@ -481,8 +446,10 @@ const htmlContent = `
         </div>
     </div>
 
+    <audio id="audioBridge" style="display:none;"></audio>
+
 <script>
-    let audioCtx, wsConn, nextTime=0;
+    let audioCtx, wsConn;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10 };
 
     window.ui = {
@@ -492,15 +459,58 @@ const htmlContent = `
         targetParent: null,
         addType: 'freq',
 
+        // --- BACKGROUND AUDIO MAGIC ---
         init() {
-            audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
-            if(audioCtx.state==='suspended') audioCtx.resume();
-            const o=audioCtx.createOscillator(); const g=audioCtx.createGain();
-            o.connect(g); g.connect(audioCtx.destination); o.frequency.value=10; g.gain.value=0.001; o.start();
-            document.getElementById('startScreen').style.opacity='0';
-            setTimeout(()=>document.getElementById('startScreen').style.display='none',300);
+            // One-time interaction handler
+            document.body.addEventListener('click', this.startAudioContext, { once: true });
+            document.body.addEventListener('touchstart', this.startAudioContext, { once: true });
+            
+            // Immediately attempt connection visually
             window.ws.connect();
         },
+
+        startAudioContext() {
+            if (audioCtx) return; // Already started
+
+            // 1. Create Audio Context
+            audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
+            
+            // 2. Resume if suspended (common on iOS)
+            if(audioCtx.state==='suspended') audioCtx.resume();
+
+            // 3. Create Audio Element Bridge (Crucial for background)
+            const dest = audioCtx.createMediaStreamDestination();
+            const audioEl = document.getElementById('audioBridge');
+            audioEl.srcObject = dest.stream;
+            audioEl.play().catch(e => console.log("Audio play failed (waiting for interaction)", e));
+
+            // 4. Connect Silent Oscillator to Keep Alive
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(dest); // Connect to bridge, not direct destination
+            osc.frequency.value = 10; 
+            gain.gain.value = 0.001;
+            osc.start();
+
+            // 5. Setup Media Session
+            if ('mediaSession' in navigator) {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: 'SDR Receiver',
+                    artist: 'Live Monitor',
+                    album: 'SDR Commander'
+                });
+                navigator.mediaSession.setActionHandler('play', () => { 
+                    audioCtx.resume(); 
+                    audioEl.play(); 
+                });
+                navigator.mediaSession.setActionHandler('pause', () => { /* No-op for live */ });
+            }
+
+            // Expose destination for WS to connect to
+            window.audioDest = dest;
+        },
+
         upd(m) {
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
             this.els.freq.innerText = (m.freq/1e6).toFixed(3);
@@ -514,6 +524,11 @@ const htmlContent = `
             
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
+
+            // Update Media Session Metadata
+            if ('mediaSession' in navigator) {
+                navigator.mediaSession.metadata.title = \`\${(m.freq/1e6).toFixed(3)} MHz (\${m.mode})\`;
+            }
         },
         renderSq(v) {
             this.els.sq.style.left = v + '%'; 
@@ -681,7 +696,9 @@ const htmlContent = `
         del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
         audio(b) {
-            if(!audioCtx) return;
+            // Audio processing only happens if Context is started
+            if(!audioCtx || audioCtx.state === 'suspended') return;
+
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
@@ -700,12 +717,30 @@ const htmlContent = `
             
             const buf = audioCtx.createBuffer(1, f.length, 24000);
             buf.getChannelData(0).set(f);
-            const s = audioCtx.createBufferSource(); s.buffer=buf; s.connect(audioCtx.destination);
+            
+            // Connect buffer source to the MediaStreamDestination (via window.audioDest)
+            const s = audioCtx.createBufferSource(); 
+            s.buffer = buf; 
+            
+            // Use the destination created in startAudioContext if available, otherwise fallback
+            if (window.audioDest) {
+                s.connect(window.audioDest);
+            } else {
+                s.connect(audioCtx.destination);
+            }
+
             const now = audioCtx.currentTime;
-            if(nextTime < now) nextTime = now + 0.04;
-            s.start(nextTime); nextTime += buf.duration;
+            // Simple jitter buffer
+            let next = (window.nextTime || 0);
+            if(next < now) next = now + 0.04;
+            s.start(next); 
+            window.nextTime = next + buf.duration;
         }
     };
+
+    // Auto-init on load
+    window.ui.init();
 </script>
 </body>
 </html>
+`;
