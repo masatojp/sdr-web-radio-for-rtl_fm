@@ -1,11 +1,11 @@
 /**
- * Modern Web SDR - Discord Notification Edition
+ * Modern Web SDR - Discord 401 Fix Edition
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
-require('dotenv').config(); // Load .env file
+require('dotenv').config();
 const http = require('http');
-const https = require('https'); // For Discord Webhook
+const https = require('https');
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
@@ -33,56 +33,74 @@ const CONFIG = {
 if (!fs.existsSync(CONFIG.recordingsPath)) fs.mkdirSync(CONFIG.recordingsPath);
 
 // ==========================================
-// Discord Notification Function
+// Discord Notification Function (Fixed)
 // ==========================================
 function sendDiscordNotification() {
-    const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
-    if (!webhookUrl) {
-        console.log("[System] Discord Webhook URL not set. Skipping notification.");
+    // 1. 前後の空白を削除 (.trim)
+    const rawUrl = process.env.DISCORD_WEBHOOK_URL || "";
+    const webhookUrl = rawUrl.trim();
+
+    if (!webhookUrl || !webhookUrl.startsWith("https://")) {
+        console.log("[System] Discord Webhook URL not set or invalid. Skipping.");
         return;
     }
 
+    // デバッグログ: URLが正しく読めているか確認 (セキュリティのため一部隠す)
+    const mask = webhookUrl.length > 50 ? webhookUrl.substring(0, 40) + "..." : "Short URL";
+    console.log(`[System] Sending Notification to: ${mask}`);
+
     const payload = JSON.stringify({
         username: "SDR Commander",
-        avatar_url: "https://cdn-icons-png.flaticon.com/512/3659/3659738.png", // Icon (Radio Tower)
+        avatar_url: "https://cdn-icons-png.flaticon.com/512/3659/3659738.png",
         embeds: [{
             title: "📡 System Started",
             description: "SDR Web Receiver is now online.",
-            color: 5814783, // Green
+            color: 5814783,
             fields: [
                 { name: "Port", value: CONFIG.webPort.toString(), inline: true },
                 { name: "Initial Freq", value: `${(CONFIG.initialFreq/1e6).toFixed(3)} MHz`, inline: true },
                 { name: "Mode", value: CONFIG.initialMode, inline: true }
             ],
+            footer: { text: "Node.js SDR Controller" },
             timestamp: new Date().toISOString()
         }]
     });
 
-    const urlObj = new URL(webhookUrl);
-    const options = {
-        hostname: urlObj.hostname,
-        path: urlObj.pathname + urlObj.search,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(payload)
-        }
-    };
+    try {
+        const urlObj = new URL(webhookUrl);
+        const options = {
+            hostname: urlObj.hostname,
+            path: urlObj.pathname + urlObj.search,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(payload),
+                'User-Agent': 'NodeSDR/1.0' // User-Agentを追加
+            }
+        };
 
-    const req = https.request(options, (res) => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-            console.log("[System] Discord Notification Sent.");
-        } else {
-            console.error(`[System] Discord Error: Status ${res.statusCode}`);
-        }
-    });
+        const req = https.request(options, (res) => {
+            let responseData = '';
+            res.on('data', (chunk) => { responseData += chunk; });
+            res.on('end', () => {
+                if (res.statusCode >= 200 && res.statusCode < 300) {
+                    console.log("[System] Discord Notification Sent Successfully.");
+                } else {
+                    console.error(`[System] Discord Error: Status ${res.statusCode}`);
+                    console.error(`[System] Response: ${responseData}`); // エラー内容を表示
+                }
+            });
+        });
 
-    req.on('error', (e) => {
-        console.error(`[System] Discord Request Failed: ${e.message}`);
-    });
+        req.on('error', (e) => {
+            console.error(`[System] Discord Request Failed: ${e.message}`);
+        });
 
-    req.write(payload);
-    req.end();
+        req.write(payload);
+        req.end();
+    } catch (e) {
+        console.error(`[System] URL Parse Error: ${e.message}`);
+    }
 }
 
 // ==========================================
@@ -179,11 +197,11 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // Attenuator Logic
-    let gainVal = '48';
-    if (att === 'weak') gainVal = '35';
-    if (att === 'mid')  gainVal = '10';
-    if (att === 'strong') gainVal = '0';
+    // Attenuator Logic (Gain Control)
+    let gainVal = '48'; // OFF = Max
+    if (att === 'weak') gainVal = '35';   // WEAK
+    if (att === 'mid')  gainVal = '10';   // MID
+    if (att === 'strong') gainVal = '0';  // STRONG
 
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
     console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
@@ -285,17 +303,8 @@ wss.on('connection', ws => {
             else if (c.type === 'start_recording') startRec();
             else if (c.type === 'stop_recording') stopRec();
             else if (c.type === 'delete_recording') { fs.unlinkSync(path.join(CONFIG.recordingsPath, c.filename)); broadcastRecordings(); }
-            else if (c.type === 'add_bookmark') { 
-                c.data.id = Date.now().toString(); 
-                bookmarks.push(c.data); 
-                saveData(); 
-                ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
-            }
-            else if (c.type === 'delete_bookmark') { 
-                bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); 
-                saveData(); 
-                ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
-            }
+            else if (c.type === 'add_bookmark') { c.data.id = Date.now().toString(); bookmarks.push(c.data); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
+            else if (c.type === 'delete_bookmark') { bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
         } catch(e){}
     });
 });
@@ -700,4 +709,3 @@ const htmlContent = `
 </script>
 </body>
 </html>
-`;
