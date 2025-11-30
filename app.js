@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - 4-Step Attenuator
+ * Modern Web SDR - Visual Squelch UI
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -14,7 +14,7 @@ const { spawn } = require('child_process');
 // ==========================================
 const CONFIG = {
     webPort: 3000,
-    password: "admin", // ★パスワード
+    password: "admin", 
     
     // SDR初期設定
     initialFreq: 126450000, 
@@ -93,6 +93,7 @@ class AudioDSP {
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.8 + rms * 0.2;
 
+        // Instant Squelch Logic
         const open = Math.max(0.005, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -123,11 +124,10 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // Attenuator Logic (Gain Control)
-    let gainVal = '48'; // OFF = Max
-    if (att === 'weak') gainVal = '35';   // WEAK = High-Mid (For slightly noisy signals)
-    if (att === 'mid')  gainVal = '18';   // MID  = Low-Mid (For local signals)
-    if (att === 'strong') gainVal = '0';  // STRONG = Min (Strong interference)
+    let gainVal = '48';
+    if (att === 'weak') gainVal = '35';
+    if (att === 'mid')  gainVal = '18';
+    if (att === 'strong') gainVal = '0';
 
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
     console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
@@ -140,8 +140,15 @@ function startRadio(freq, mode, att) {
 function handleAudio(raw) {
     const res = dsp.process(raw, { squelchThreshold });
     const head = new Int16Array(1); head[0] = res.rssi;
-    const buf = Buffer.concat([Buffer.from(head.buffer), res.buffer]);
-    wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(buf); });
+    // Embed Squelch Status (Open/Close) in the 2nd Int16 for UI feedback
+    const statusWord = res.isOpen ? 1 : 0; 
+    // Create a slightly larger buffer to hold status
+    const combo = Buffer.alloc(raw.length + 4); // +4 bytes for RSSI(2) and Status(2)
+    combo.writeInt16LE(res.rssi, 0);
+    combo.writeInt16LE(statusWord, 2);
+    res.buffer.copy(combo, 4);
+
+    wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(combo); });
     if (isRecording && recordingStream && res.isOpen) recordingStream.write(res.buffer);
 }
 
@@ -236,7 +243,7 @@ server.listen(CONFIG.webPort, () => {
 });
 
 // ==========================================
-// Frontend
+// Frontend (Visual Squelch)
 // ==========================================
 const htmlContent = `
 <!DOCTYPE html>
@@ -256,24 +263,36 @@ const htmlContent = `
     .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 15px 0; }
     .badges { display: flex; justify-content: center; gap: 8px; }
     .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); }
+    .badge-sql.open { background: var(--acc-dim); color: var(--acc); border-color: var(--acc); }
     
-    .meter { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; position: relative; margin-top: 20px; overflow: hidden; }
-    .fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2196f3, var(--acc)); transition: width 0.08s; }
-    .mark { position: absolute; top:0; bottom:0; width: 2px; background: #ffd700; z-index: 2; transition: left 0.1s; }
+    /* Visual Squelch Meter */
+    .meter-wrap { position: relative; height: 36px; margin-top: 20px; display: flex; align-items: center; }
+    .meter-bg { position: absolute; left: 0; right: 0; top: 12px; bottom: 12px; background: rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; }
+    .meter-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2196f3, var(--acc)); transition: width 0.05s ease-out; }
     
+    /* Range Input Overlay */
+    input[type=range] { 
+        position: absolute; left: 0; width: 100%; height: 100%; 
+        -webkit-appearance: none; background: transparent; margin: 0; z-index: 10; cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 100%; background: transparent; }
+    input[type=range]::-webkit-slider-thumb { 
+        -webkit-appearance: none; 
+        height: 36px; width: 4px; /* The yellow bar */
+        background: #ffd700; border-radius: 2px;
+        box-shadow: 0 0 10px #ffd700;
+        margin-top: 0px; 
+    }
+    .sq-label { text-align: center; font-size: 0.7rem; color: var(--sub); margin-top: 4px; }
+
     .ctrls { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
     .btn-row { display: flex; gap: 8px; width: 100%; }
     .btn { flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--txt); padding: 12px 8px; border-radius: 12px; font-weight: 600; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 6px; font-size: 0.75rem; transition: background 0.1s; white-space: nowrap; }
     .btn:active { background: rgba(255,255,255,0.15); transform: scale(0.98); }
     .btn.active { background: var(--acc-dim); border-color: var(--acc); color: var(--acc); }
-    
     .btn-tune { background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05)); font-size: 1rem; }
     .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
     @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
-
-    input[type=range] { width: 100%; -webkit-appearance: none; background: transparent; margin-top: 15px; }
-    input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 20px; width: 20px; border-radius: 50%; background: #fff; margin-top: -8px; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
-    input[type=range]::-webkit-slider-runnable-track { height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; }
 
     .tree { display: flex; flex-direction: column; gap: 2px; }
     .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; transition: background 0.1s; }
@@ -311,13 +330,15 @@ const htmlContent = `
             <div class="badges">
                 <span class="badge" id="bdgMode">AM</span>
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
+                <span class="badge" id="bdgSql">MUTED</span>
             </div>
             <div class="freq" id="dspFreq">---.---</div>
-            <div class="meter"><div class="fill" id="dspRssi"></div><div class="mark" id="dspSq" style="left:10%"></div></div>
-            <div style="display:flex; align-items:center; gap:10px; margin-top:5px;">
-                <span class="material-symbols-outlined" style="color:var(--sub)">graphic_eq</span>
+            
+            <div class="meter-wrap">
+                <div class="meter-bg"><div class="meter-fill" id="dspRssi"></div></div>
                 <input type="range" id="inpSq" min="0" max="60" value="10" oninput="window.ui.updSq(this.value)" onchange="window.ws.sendSq(this.value)">
             </div>
+            <div class="sq-label">SQUELCH THRESHOLD</div>
         </div>
 
         <div class="ctrls">
@@ -361,7 +382,7 @@ const htmlContent = `
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set() };
 
     window.ui = {
-        els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('dspSq') },
+        els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi') },
         modalMode: 'AM',
         init() {
             audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
@@ -379,17 +400,14 @@ const htmlContent = `
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
             document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
             
-            // ATT Buttons State (4-Steps)
-            document.getElementById('attOff').className = 'btn '+(m.att==='off'?'active':'');
-            document.getElementById('attWeak').className = 'btn '+(m.att==='weak'?'active':'');
-            document.getElementById('attMid').className = 'btn '+(m.att==='mid'?'active':'');
-            document.getElementById('attStrong').className = 'btn '+(m.att==='strong'?'active':'');
+            ['off','weak','mid','strong'].forEach(k => {
+                document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':'');
+            });
             
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             document.getElementById('inpSq').value = m.squelch;
-            this.updSq(m.squelch);
         },
-        updSq(v) { this.els.sq.style.left = ((v/60)*100)+'%'; },
+        updSq(v) { /* Handled via CSS slider natively now */ },
         modal(show) {
             document.getElementById('modal').style.display = show?'flex':'none';
             if(show) { 
@@ -515,10 +533,27 @@ const htmlContent = `
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
         audio(b) {
             if(!audioCtx) return;
-            const v = new Int16Array(b);
-            const f = new Float32Array(v.length-1);
-            for(let i=0; i<f.length; i++) f[i] = v[i+1]/32768.0;
-            window.ui.els.rssi.style.width = Math.min(100, (v[0]/200)*100)+'%';
+            // Decode combined buffer [RSSI(2), SQL(2), AUDIO...]
+            const dv = new DataView(b);
+            const rssi = dv.getInt16(0, true);
+            const sqlOpen = dv.getInt16(2, true);
+            
+            // Visual Update
+            window.ui.els.rssi.style.width = Math.min(100, (rssi/200)*100)+'%';
+            const bdgSql = document.getElementById('bdgSql');
+            if (sqlOpen) {
+                bdgSql.innerText = 'SQL OPEN';
+                bdgSql.className = 'badge badge-sql open';
+            } else {
+                bdgSql.innerText = 'MUTED';
+                bdgSql.className = 'badge badge-sql';
+            }
+
+            // Audio Playback
+            const f = new Float32Array((b.byteLength - 4) / 2); // 16bit samples
+            const s16 = new Int16Array(b, 4); // Offset 4 bytes
+            for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
+            
             const buf = audioCtx.createBuffer(1, f.length, 24000);
             buf.getChannelData(0).set(f);
             const s = audioCtx.createBufferSource(); s.buffer=buf; s.connect(audioCtx.destination);
