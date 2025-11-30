@@ -4,3 +4,5 @@ squelch_data.json
 bookmarks.json
 #録音データフォルダをgitから除外
 recordings/
+#.envは除外する
+.env
