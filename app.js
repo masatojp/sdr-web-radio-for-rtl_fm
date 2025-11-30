@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Fixed UI Interactions
+ * Modern Web SDR - Bookmark Click Fix
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -14,7 +14,7 @@ const { spawn } = require('child_process');
 // ==========================================
 const CONFIG = {
     webPort: 3000,
-    password: "admin",
+    password: "admin", // ★ここがパスワードです
     
     // SDR初期設定 (仙台空港ATIS)
     initialFreq: 126450000, 
@@ -68,7 +68,7 @@ function saveData() {
 loadData();
 
 // ==========================================
-// DSP
+// DSP (Audio Processing)
 // ==========================================
 class AudioDSP {
     constructor() { this.reset(); }
@@ -217,6 +217,7 @@ wss.on('connection', ws => {
             const c = JSON.parse(m);
             if (c.type === 'auth_tune') {
                 if (c.password === CONFIG.password) startRadio(c.freq, c.mode, currentAtt);
+                else ws.send(JSON.stringify({type:'error', msg:'Wrong Password'}));
             }
             else if (c.type === 'set_att') startRadio(currentFreq, currentMode, c.att);
             else if (c.type === 'set_squelch') { squelchThreshold = c.val; squelchDB[currentFreq] = c.val; saveData(); broadcastStatus(); }
@@ -273,9 +274,10 @@ const htmlContent = `
     input[type=range]::-webkit-slider-runnable-track { height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; }
 
     .tree { display: flex; flex-direction: column; gap: 2px; }
-    .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; }
+    .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; transition: background 0.1s; }
     .row:hover { background: rgba(255,255,255,0.05); }
     .row:active { background: rgba(255,255,255,0.08); }
+    .row-click-area { display: flex; align-items: center; flex: 1; height: 100%; } /* Click target expander */
     .folder-c { margin-left: 10px; border-left: 2px solid rgba(255,255,255,0.1); padding-left: 10px; display: none; }
     .folder-c.open { display: block; }
     .icon { color: var(--sub); font-size: 1.2rem; transition: transform 0.2s; }
@@ -283,7 +285,7 @@ const htmlContent = `
     .txt { display: flex; flex-direction: column; }
     .sub { font-size: 0.8rem; color: var(--sub); }
     .act { display: flex; gap: 4px; }
-    .ib { background: transparent; border: none; color: var(--sub); padding: 8px; cursor: pointer; border-radius: 50%; }
+    .ib { background: transparent; border: none; color: var(--sub); padding: 8px; cursor: pointer; border-radius: 50%; z-index: 10; }
     .ib:active { background: rgba(255,255,255,0.1); color: #fff; }
 
     .ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); backdrop-filter:blur(8px); display:none; justify-content:center; align-items:flex-end; z-index: 1000; }
@@ -293,7 +295,7 @@ const htmlContent = `
     .inp:focus { outline: 2px solid var(--acc); }
     
     .start-ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:#050507; z-index: 2000; display:flex; justify-content:center; align-items:center; flex-direction:column; transition: opacity 0.3s; }
-    .big-btn { background: var(--acc); color: #000; border: none; padding: 18px 40px; border-radius: 50px; font-size: 1.2rem; font-weight: 800; box-shadow: 0 0 30px var(--acc); }
+    .big-btn { background: var(--acc); color: #000; border: none; padding: 18px 40px; border-radius: 50px; font-size: 1.2rem; font-weight: 800; box-shadow: 0 0 30px var(--acc); cursor: pointer; }
 </style>
 </head>
 <body>
@@ -336,7 +338,7 @@ const htmlContent = `
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
             <input type="number" class="inp" id="inpFreq" placeholder="128.800" step="0.001">
-            <input type="password" class="inp" id="inpPass" placeholder="Password">
+            <input type="password" class="inp" id="inpPass" placeholder="Password (required)">
             <div style="display:flex; gap:10px;">
                 <button class="btn" style="flex:1" onclick="window.ui.modal(false)">CANCEL</button>
                 <button class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.tune()">TUNE</button>
@@ -348,7 +350,6 @@ const htmlContent = `
     let audioCtx, wsConn, nextTime=0;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set() };
 
-    // Explicit Global Assignment for HTML onclick
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('dspSq') },
         init() {
@@ -375,7 +376,10 @@ const htmlContent = `
         updSq(v) { this.els.sq.style.left = ((v/60)*100)+'%'; },
         modal(show) {
             document.getElementById('modal').style.display = show?'flex':'none';
-            if(show) { document.getElementById('inpFreq').value = (state.freq/1e6).toFixed(3); }
+            if(show) { 
+                document.getElementById('inpFreq').value = (state.freq/1e6).toFixed(3); 
+                document.getElementById('inpPass').focus();
+            }
         },
         renderBM(list) {
             const d = list || state.bm;
@@ -391,7 +395,7 @@ const htmlContent = `
                     return \`
                         <div>
                             <div class="row" onclick="window.ui.tog('\${n.id}')">
-                                <div style="display:flex; align-items:center;">
+                                <div class="row-click-area">
                                     <span class="material-symbols-outlined icon \${open?'rot':''}">chevron_right</span>
                                     <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
                                 </div>
@@ -405,9 +409,11 @@ const htmlContent = `
                 }
                 return \`
                     <div class="row" onclick="window.ws.tuneDir(\${n.freq}, '\${n.mode}')">
-                        <div class="txt">
-                            <span style="font-weight:600;">\${n.title}</span>
-                            <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
+                        <div class="row-click-area">
+                            <div class="txt">
+                                <span style="font-weight:600;">\${n.title}</span>
+                                <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
+                            </div>
                         </div>
                         <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>\`;
@@ -420,9 +426,11 @@ const htmlContent = `
         renderRec(list) {
             document.getElementById('listRec').innerHTML = list.map(f => \`
                 <div class="row">
-                    <div class="txt">
-                        <span style="font-weight:600;">\${f.name.split('_')[2]||f.name}</span>
-                        <span class="sub">\${(f.size/1024/1024).toFixed(2)} MB</span>
+                    <div class="row-click-area">
+                        <div class="txt">
+                            <span style="font-weight:600;">\${f.name.split('_')[2]||f.name}</span>
+                            <span class="sub">\${(f.size/1024/1024).toFixed(2)} MB</span>
+                        </div>
                     </div>
                     <div class="act">
                         <a href="/download/\${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
@@ -461,8 +469,16 @@ const htmlContent = `
             window.ui.modal(false);
         },
         tuneDir(f, m) {
-            // Auto-tune using current or empty password to try
             const p = document.getElementById('inpPass').value;
+            // Password Missing? Open Modal and ask for it
+            if (!p) {
+                state.freq = Math.floor(f*1e6);
+                state.mode = m;
+                document.getElementById('inpFreq').value = f.toFixed(3);
+                window.ui.modal(true);
+                return;
+            }
+            // Password exists, tune immediately
             this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
             state.mode = m;
         },
