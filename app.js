@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Improved Bookmark UI
+ * Modern Web SDR - Squelch Visualizer & Numeric Control
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -51,14 +51,9 @@ function loadData() {
         if (fs.existsSync(CONFIG.squelchFile)) squelchDB = JSON.parse(fs.readFileSync(CONFIG.squelchFile));
     } catch (e) { bookmarks = defaultBookmarks; }
 }
-
 function saveData() {
-    fs.writeFile(CONFIG.bookmarksFile, JSON.stringify(bookmarks, null, 2), (err) => {
-        if(err) console.error("[System] Bookmark Save Error:", err);
-    });
-    fs.writeFile(CONFIG.squelchFile, JSON.stringify(squelchDB, null, 2), (err) => {
-        if(err) console.error("[System] Squelch Save Error:", err);
-    });
+    fs.writeFile(CONFIG.bookmarksFile, JSON.stringify(bookmarks, null, 2), () => {});
+    fs.writeFile(CONFIG.squelchFile, JSON.stringify(squelchDB, null, 2), () => {});
 }
 loadData();
 
@@ -80,9 +75,11 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
+            // HPF
             let raw = s; s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; this.lastIn = raw; this.lastOut = s;
             sumSq += s * s;
             
+            // AGC
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.6 / (this.agcPeak + 0.05);
             if (g > 15.0) g = 15.0; if (g < 1.0) g = 1.0;
@@ -96,6 +93,7 @@ class AudioDSP {
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.8 + rms * 0.2;
 
+        // Instant Squelch Logic
         const open = Math.max(0.005, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -126,6 +124,7 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
+    // Attenuator Logic
     let gainVal = '48';
     if (att === 'weak') gainVal = '35';
     if (att === 'mid')  gainVal = '10';
@@ -242,7 +241,7 @@ wss.on('connection', ws => {
                 saveData(); 
                 ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
             }
-        } catch(e){ console.error(e); }
+        } catch(e){}
     });
 });
 
@@ -264,23 +263,25 @@ const htmlContent = `
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
 <style>
-    :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; }
+    :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; }
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
     .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
     .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
     
     .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 15px 0; }
     .badges { display: flex; justify-content: center; gap: 8px; }
-    .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); }
-    .badge-sql.open { background: var(--acc-dim); color: var(--acc); border-color: var(--acc); }
+    .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); transition: 0.2s; }
+    .badge-sql { background: var(--mute); color: #ccc; }
+    .badge-sql.open { background: var(--open); color: #000; box-shadow: 0 0 10px var(--open); font-weight: bold; }
     
-    .meter-wrap { position: relative; height: 36px; margin-top: 20px; display: flex; align-items: center; }
-    .meter-bg { position: absolute; left: 0; right: 0; top: 12px; bottom: 12px; background: rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; }
-    .meter-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2196f3, var(--acc)); transition: width 0.05s ease-out; }
-    .sq-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: #ffd700; z-index: 5; transition: left 0.1s; box-shadow: 0 0 5px #ffd700; }
+    /* Improved Meter */
+    .meter-wrap { position: relative; height: 32px; margin-top: 20px; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; background: #111; }
+    .meter-fill { height: 100%; width: 0%; background: var(--mute); transition: width 0.05s ease-out, background 0.1s; }
+    .meter-fill.active { background: var(--open); box-shadow: 0 0 15px var(--open); }
+    .sq-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: #ffd700; z-index: 5; transition: left 0.1s; box-shadow: 0 0 8px #ffd700; }
 
     .sq-ctrl-row { display: flex; justify-content: space-between; align-items: center; margin-top: 15px; }
-    .sq-val-display { font-family: 'JetBrains Mono', monospace; font-size: 1rem; color: #ffd700; font-weight: bold; }
+    .sq-val-display { font-family: 'JetBrains Mono', monospace; font-size: 1rem; color: #ffd700; font-weight: bold; margin-left: 5px; }
     .sq-btn-group { display: flex; gap: 4px; }
     .btn-sq { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.1); color: var(--txt); padding: 8px 0; width: 36px; border-radius: 6px; font-size: 0.75rem; cursor: pointer; text-align: center; }
     .btn-sq:active { background: var(--acc); color: #000; border-color: var(--acc); }
@@ -334,17 +335,17 @@ const htmlContent = `
             <div class="badges">
                 <span class="badge" id="bdgMode">AM</span>
                 <span class="badge" id="bdgAtt" style="display:none">ATT</span>
-                <span class="badge" id="bdgSql">MUTED</span>
+                <span class="badge badge-sql" id="bdgSql">MUTED</span>
             </div>
             <div class="freq" id="dspFreq">---.---</div>
             
             <div class="meter-wrap">
-                <div class="meter-bg"><div class="meter-fill" id="dspRssi"></div></div>
+                <div class="meter-fill" id="dspRssi"></div>
                 <div class="sq-mark" id="sqMarker" style="left:10%"></div>
             </div>
             
             <div class="sq-ctrl-row">
-                <div style="font-size:0.8rem; color:var(--sub);">SQL <span id="valSq" class="sq-val-display">10</span></div>
+                <div style="font-size:0.8rem; color:var(--sub);">AUDIO LEVEL > <span id="valSq" class="sq-val-display">10</span></div>
                 <div class="sq-btn-group">
                     <button class="btn-sq" onclick="window.ui.adjSq(-10)">-10</button>
                     <button class="btn-sq" onclick="window.ui.adjSq(-5)">-5</button>
@@ -425,7 +426,7 @@ const htmlContent = `
         modalMode: 'AM',
         addMode: 'AM',
         targetParent: null,
-        addType: 'freq', // 'freq' or 'folder'
+        addType: 'freq',
 
         init() {
             audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
@@ -462,7 +463,7 @@ const htmlContent = `
             window.ws.sendSq(n);
         },
         modal(type, parentId=null) {
-            this.closeModal(); // Reset
+            this.closeModal(); 
             if (type === 'tune') {
                 document.getElementById('modalTune').style.display = 'flex';
                 document.getElementById('inpFreq').value = (state.freq/1e6).toFixed(3); 
@@ -472,10 +473,8 @@ const htmlContent = `
                 document.getElementById('modalAdd').style.display = 'flex';
                 this.targetParent = parentId;
                 this.addType = (type === 'add_folder') ? 'folder' : 'freq';
-                
                 document.getElementById('addTitle').innerText = (this.addType === 'folder') ? "Create Folder" : "Add Channel";
                 document.getElementById('addName').value = "";
-                
                 if (this.addType === 'folder') {
                     document.getElementById('addFreqGroup').style.display = 'none';
                 } else {
@@ -593,6 +592,8 @@ const htmlContent = `
             if (!p) {
                 state.freq = Math.floor(f*1e6);
                 state.mode = m;
+                document.getElementById('inpFreq').value = f.toFixed(3);
+                window.ui.selMod(m);
                 window.ui.modal('tune');
                 return;
             }
@@ -602,17 +603,14 @@ const htmlContent = `
         saveBookmark() {
             const title = document.getElementById('addName').value;
             if (!title) return;
-            
             const isFolder = (window.ui.addType === 'folder');
             const data = { title, isFolder, parentId: window.ui.targetParent };
-            
             if (!isFolder) {
                 const freqVal = parseFloat(document.getElementById('addFreq').value);
                 if (!freqVal) return;
                 data.freq = freqVal;
                 data.mode = window.ui.addMode;
             }
-            
             this.send({type:'add_bookmark', data});
             window.ui.closeModal();
         },
@@ -624,15 +622,14 @@ const htmlContent = `
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
             
-            window.ui.els.rssi.style.width = Math.min(100, (rssi/200)*100)+'%';
+            // Meter Color Logic: Gray if muted, Green if open
+            const bar = window.ui.els.rssi;
+            bar.style.width = Math.min(100, (rssi/200)*100)+'%';
+            if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
+
             const bdgSql = document.getElementById('bdgSql');
-            if (sqlOpen) {
-                bdgSql.innerText = 'SQL OPEN';
-                bdgSql.className = 'badge badge-sql open';
-            } else {
-                bdgSql.innerText = 'MUTED';
-                bdgSql.className = 'badge badge-sql';
-            }
+            if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
+            else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
 
             const f = new Float32Array((b.byteLength - 4) / 2);
             const s16 = new Int16Array(b, 4);
