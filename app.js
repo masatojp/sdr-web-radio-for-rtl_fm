@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Bookmark Click Fix
+ * Modern Web SDR - Instant Squelch Edition
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -14,7 +14,7 @@ const { spawn } = require('child_process');
 // ==========================================
 const CONFIG = {
     webPort: 3000,
-    password: "admin", // ★ここがパスワードです
+    password: "admin",
     
     // SDR初期設定 (仙台空港ATIS)
     initialFreq: 126450000, 
@@ -72,7 +72,14 @@ loadData();
 // ==========================================
 class AudioDSP {
     constructor() { this.reset(); }
-    reset() { this.lastIn=0; this.lastOut=0; this.agcPeak=0; this.agcGain=1.0; this.squelchGate=0.0; this.rms=0; }
+    reset() { 
+        this.lastIn=0; 
+        this.lastOut=0; 
+        this.agcPeak=0; 
+        this.agcGain=1.0; 
+        this.squelchGate=0.0; // 0.0=Muted, 1.0=Open
+        this.rms=0; 
+    }
     process(inputBuffer, opts) {
         const len = inputBuffer.length / 2;
         const out = Buffer.alloc(len * 2);
@@ -81,29 +88,45 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            // HPF
+            // HPF (DC Cut)
             let raw = s; s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; this.lastIn = raw; this.lastOut = s;
             sumSq += s * s;
-            // AGC
+            
+            // AGC (Auto Gain Control)
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.6 / (this.agcPeak + 0.05);
             if (g > 15.0) g = 15.0; if (g < 1.0) g = 1.0;
             this.agcGain = this.agcGain * 0.99 + g * 0.01;
             
+            // Apply Gate & Gain
             let p = s * this.agcGain * this.squelchGate;
+            
+            // Hard Limiter
             if (p > 0.98) p = 0.98; if (p < -0.98) p = -0.98;
             out.writeInt16LE(Math.floor(p * 32767), i * 2);
         }
 
+        // Calculate RMS for Squelch Logic
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.8 + rms * 0.2;
 
-        const open = Math.max(0.005, sqThresh);
-        const close = open * 0.8;
-        if (this.rms > open) this.squelchGate = 0.9 * this.squelchGate + 0.1;
-        else if (this.rms < close) { this.squelchGate *= 0.95; if (this.squelchGate < 0.01) this.squelchGate = 0; }
+        // --- Instant Squelch Logic ---
+        // Minimum floor to prevent opening on pure silence
+        const open = Math.max(0.005, sqThresh); 
+        const close = open * 0.8; // Hysteresis
 
-        return { buffer: out, rssi: Math.min(100, Math.floor(Math.sqrt(this.rms) * 200)), isOpen: this.squelchGate > 0.1 };
+        if (this.rms > open) {
+            this.squelchGate = 1.0; // Instant Open
+        } else if (this.rms < close) {
+            this.squelchGate = 0.0; // Instant Close
+        }
+        // If between thresholds, maintain previous state (No change)
+
+        return { 
+            buffer: out, 
+            rssi: Math.min(100, Math.floor(Math.sqrt(this.rms) * 200)), 
+            isOpen: this.squelchGate === 1.0 
+        };
     }
 }
 const dsp = new AudioDSP();
@@ -217,7 +240,6 @@ wss.on('connection', ws => {
             const c = JSON.parse(m);
             if (c.type === 'auth_tune') {
                 if (c.password === CONFIG.password) startRadio(c.freq, c.mode, currentAtt);
-                else ws.send(JSON.stringify({type:'error', msg:'Wrong Password'}));
             }
             else if (c.type === 'set_att') startRadio(currentFreq, currentMode, c.att);
             else if (c.type === 'set_squelch') { squelchThreshold = c.val; squelchDB[currentFreq] = c.val; saveData(); broadcastStatus(); }
