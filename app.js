@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - UI Remastered (Folder Support Edition)
+ * Modern Web SDR - Fixed UI Interactions
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -36,7 +36,6 @@ if (!fs.existsSync(CONFIG.recordingsPath)) fs.mkdirSync(CONFIG.recordingsPath);
 let bookmarks = [];
 let squelchDB = {};
 
-// 初期データの定義（ファイルがない場合に使用）
 const defaultBookmarks = [
   { "title": "Sendai Airport", "isFolder": true, "parentId": null, "id": "1763731824815" },
   { "title": "SDJ ATIS", "freq": 126.45, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731847585" },
@@ -57,21 +56,10 @@ const defaultBookmarks = [
 
 function loadData() {
     try {
-        if (fs.existsSync(CONFIG.bookmarksFile)) {
-            bookmarks = JSON.parse(fs.readFileSync(CONFIG.bookmarksFile));
-        } else {
-            // ファイルがなければ初期データをロード＆保存
-            bookmarks = defaultBookmarks;
-            saveData();
-        }
-        
-        if (fs.existsSync(CONFIG.squelchFile)) {
-            squelchDB = JSON.parse(fs.readFileSync(CONFIG.squelchFile));
-        }
-    } catch (e) {
-        console.error("Data Load Error:", e);
-        bookmarks = defaultBookmarks;
-    }
+        if (fs.existsSync(CONFIG.bookmarksFile)) bookmarks = JSON.parse(fs.readFileSync(CONFIG.bookmarksFile));
+        else { bookmarks = defaultBookmarks; saveData(); }
+        if (fs.existsSync(CONFIG.squelchFile)) squelchDB = JSON.parse(fs.readFileSync(CONFIG.squelchFile));
+    } catch (e) { bookmarks = defaultBookmarks; }
 }
 function saveData() {
     fs.writeFile(CONFIG.bookmarksFile, JSON.stringify(bookmarks, null, 2), () => {});
@@ -80,62 +68,42 @@ function saveData() {
 loadData();
 
 // ==========================================
-// DSP (Audio Processing)
+// DSP
 // ==========================================
 class AudioDSP {
     constructor() { this.reset(); }
-    reset() {
-        this.lastIn = 0; this.lastOut = 0;
-        this.agcPeak = 0; this.agcGain = 1.0;
-        this.squelchGate = 0.0; this.rms = 0;
-    }
+    reset() { this.lastIn=0; this.lastOut=0; this.agcPeak=0; this.agcGain=1.0; this.squelchGate=0.0; this.rms=0; }
     process(inputBuffer, opts) {
-        const inputLen = inputBuffer.length / 2;
-        const outputBuffer = Buffer.alloc(inputLen * 2);
-        const squelchThresh = opts.squelchThreshold / 100.0;
+        const len = inputBuffer.length / 2;
+        const out = Buffer.alloc(len * 2);
+        const sqThresh = opts.squelchThreshold / 100.0;
         let sumSq = 0;
 
-        for (let i = 0; i < inputLen; i++) {
-            let sample = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            
-            // HPF (DC Cut)
-            let raw = sample;
-            sample = raw - 0.95 * this.lastIn + 0.95 * this.lastOut;
-            this.lastIn = raw; this.lastOut = sample;
-
-            sumSq += sample * sample;
-
+        for (let i = 0; i < len; i++) {
+            let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
+            // HPF
+            let raw = s; s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; this.lastIn = raw; this.lastOut = s;
+            sumSq += s * s;
             // AGC
-            const absSample = Math.abs(sample);
-            this.agcPeak = this.agcPeak * 0.999 + absSample * 0.001;
-            let targetGain = 0.6 / (this.agcPeak + 0.05);
-            if (targetGain > 15.0) targetGain = 15.0;
-            if (targetGain < 1.0) targetGain = 1.0;
-            this.agcGain = this.agcGain * 0.99 + targetGain * 0.01;
+            this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
+            let g = 0.6 / (this.agcPeak + 0.05);
+            if (g > 15.0) g = 15.0; if (g < 1.0) g = 1.0;
+            this.agcGain = this.agcGain * 0.99 + g * 0.01;
             
-            let processed = sample * this.agcGain * this.squelchGate;
-            
-            // Limiter
-            if (processed > 0.98) processed = 0.98;
-            if (processed < -0.98) processed = -0.98;
-
-            outputBuffer.writeInt16LE(Math.floor(processed * 32767), i * 2);
+            let p = s * this.agcGain * this.squelchGate;
+            if (p > 0.98) p = 0.98; if (p < -0.98) p = -0.98;
+            out.writeInt16LE(Math.floor(p * 32767), i * 2);
         }
 
-        const blockRms = Math.sqrt(sumSq / inputLen);
-        this.rms = this.rms * 0.8 + blockRms * 0.2;
+        const rms = Math.sqrt(sumSq / len);
+        this.rms = this.rms * 0.8 + rms * 0.2;
 
-        // Squelch Logic
-        const openThresh = Math.max(0.005, squelchThresh);
-        const closeThresh = openThresh * 0.8;
-        if (this.rms > openThresh) this.squelchGate = 0.9 * this.squelchGate + 0.1;
-        else if (this.rms < closeThresh) {
-            this.squelchGate *= 0.95;
-            if (this.squelchGate < 0.01) this.squelchGate = 0;
-        }
+        const open = Math.max(0.005, sqThresh);
+        const close = open * 0.8;
+        if (this.rms > open) this.squelchGate = 0.9 * this.squelchGate + 0.1;
+        else if (this.rms < close) { this.squelchGate *= 0.95; if (this.squelchGate < 0.01) this.squelchGate = 0; }
 
-        const displayRssi = Math.min(100, Math.floor(Math.sqrt(this.rms) * 200)); 
-        return { buffer: outputBuffer, rssi: displayRssi, isOpen: this.squelchGate > 0.1 };
+        return { buffer: out, rssi: Math.min(100, Math.floor(Math.sqrt(this.rms) * 200)), isOpen: this.squelchGate > 0.1 };
     }
 }
 const dsp = new AudioDSP();
@@ -147,7 +115,6 @@ let rtlProcess = null;
 let currentFreq = CONFIG.initialFreq;
 let currentMode = CONFIG.initialMode;
 let currentAtt = 'off';
-let isTuning = false;
 let isRecording = false;
 let recordingStream = null;
 let recordingFilename = "";
@@ -155,33 +122,26 @@ let squelchThreshold = 10;
 
 function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
+    currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    currentFreq = freq; currentMode = mode; currentAtt = att;
-    isTuning = true; dsp.reset();
-
     let gainVal = '40';
     if (att === 'weak') gainVal = '20';
     if (att === 'strong') gainVal = '0';
 
     const args = ['-M', mode === 'FM' ? 'fm' : 'am', '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
-    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode})`);
+    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz`);
     
     rtlProcess = spawn('rtl_fm', args);
-    rtlProcess.stdout.on('data', (chunk) => handleAudioStream(chunk));
-    
-    setTimeout(() => { isTuning = false; broadcastStatus(); }, 500);
+    rtlProcess.stdout.on('data', (c) => handleAudio(c));
+    setTimeout(() => broadcastStatus(), 500);
 }
 
-function handleAudioStream(rawChunk) {
-    const result = dsp.process(rawChunk, { squelchThreshold });
-    const header = new Int16Array(1); header[0] = result.rssi;
-    const sendBuffer = Buffer.concat([Buffer.from(header.buffer), result.buffer]);
-
-    wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(sendBuffer); });
-
-    if (isRecording && recordingStream && result.isOpen) {
-        recordingStream.write(result.buffer);
-    }
+function handleAudio(raw) {
+    const res = dsp.process(raw, { squelchThreshold });
+    const head = new Int16Array(1); head[0] = res.rssi;
+    const buf = Buffer.concat([Buffer.from(head.buffer), res.buffer]);
+    wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(buf); });
+    if (isRecording && recordingStream && res.isOpen) recordingStream.write(res.buffer);
 }
 
 function startRec() {
@@ -191,8 +151,7 @@ function startRec() {
     const fp = path.join(CONFIG.recordingsPath, recordingFilename);
     recordingStream = fs.createWriteStream(fp);
     writeWavHeader(recordingStream, CONFIG.sampleRate, 0);
-    isRecording = true;
-    broadcastStatus();
+    isRecording = true; broadcastStatus();
 }
 
 function stopRec() {
@@ -200,18 +159,16 @@ function stopRec() {
     isRecording = false;
     if (recordingStream) {
         const fp = recordingStream.path;
-        const bytes = recordingStream.bytesWritten - 44;
+        const b = recordingStream.bytesWritten - 44;
         recordingStream.end();
         setTimeout(() => {
             fs.open(fp, 'r+', (err, fd) => {
                 if (!err) {
-                    const buf = Buffer.alloc(44);
-                    buf.write('RIFF', 0); buf.writeUInt32LE(36 + bytes, 4); buf.write('WAVE', 8);
-                    buf.write('fmt ', 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20);
-                    buf.writeUInt16LE(1, 22); buf.writeUInt32LE(CONFIG.sampleRate, 24);
-                    buf.writeUInt32LE(CONFIG.sampleRate * 2, 28); buf.writeUInt16LE(2, 32);
-                    buf.writeUInt16LE(16, 34); buf.write('data', 36); buf.writeUInt32LE(bytes, 40);
-                    fs.write(fd, buf, 0, 44, 0, () => fs.close(fd, ()=>{}));
+                    const h = Buffer.alloc(44);
+                    h.write('RIFF',0); h.writeUInt32LE(36+b,4); h.write('WAVE',8); h.write('fmt ',12);
+                    h.writeUInt32LE(16,16); h.writeUInt16LE(1,20); h.writeUInt16LE(1,22); h.writeUInt32LE(CONFIG.sampleRate,24);
+                    h.writeUInt32LE(CONFIG.sampleRate*2,28); h.writeUInt16LE(2,32); h.writeUInt16LE(16,34); h.write('data',36); h.writeUInt32LE(b,40);
+                    fs.write(fd, h, 0, 44, 0, () => fs.close(fd, ()=>{}));
                 }
             });
         }, 100);
@@ -220,42 +177,36 @@ function stopRec() {
     broadcastStatus(); broadcastRecordings();
 }
 
-function writeWavHeader(stream, sampleRate, len) {
+function writeWavHeader(s, r, l) {
     const b = Buffer.alloc(44);
-    b.write('RIFF',0); b.writeUInt32LE(36+len,4); b.write('WAVE',8); b.write('fmt ',12);
-    b.writeUInt32LE(16,16); b.writeUInt16LE(1,20); b.writeUInt16LE(1,22); b.writeUInt32LE(sampleRate,24);
-    b.writeUInt32LE(sampleRate*2,28); b.writeUInt16LE(2,32); b.writeUInt16LE(16,34); b.write('data',36);
-    b.writeUInt32LE(len,40); stream.write(b);
+    b.write('RIFF',0); b.writeUInt32LE(36+l,4); b.write('WAVE',8); b.write('fmt ',12);
+    b.writeUInt32LE(16,16); b.writeUInt16LE(1,20); b.writeUInt16LE(1,22); b.writeUInt32LE(r,24);
+    b.writeUInt32LE(r*2,28); b.writeUInt16LE(2,32); b.writeUInt16LE(16,34); b.write('data',36); b.writeUInt32LE(l,40); s.write(b);
 }
 
 // ==========================================
-// Server & WebSocket
+// Server
 // ==========================================
 const server = http.createServer((req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    if (url.pathname === '/') {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(htmlContent);
-    } else if (url.pathname.startsWith('/download/')) {
-        const f = path.basename(decodeURIComponent(url.pathname));
+    const u = new URL(req.url, `http://${req.headers.host}`);
+    if (u.pathname === '/') { res.writeHead(200,{'Content-Type':'text/html'}); res.end(htmlContent); }
+    else if (u.pathname.startsWith('/download/')) {
+        const f = path.basename(decodeURIComponent(u.pathname));
         const fp = path.join(CONFIG.recordingsPath, f);
-        if (fs.existsSync(fp)) {
-            res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Disposition': `attachment; filename="${f}"` });
-            fs.createReadStream(fp).pipe(res);
-        } else { res.writeHead(404); res.end(); }
+        if (fs.existsSync(fp)) { res.writeHead(200,{'Content-Type':'audio/wav','Content-Disposition':`attachment; filename="${f}"`}); fs.createReadStream(fp).pipe(res); }
+        else { res.writeHead(404); res.end(); }
     } else { res.writeHead(404); res.end(); }
 });
 const wss = new WebSocket.Server({ server });
 
 function broadcastStatus() {
-    const msg = JSON.stringify({ type: 'status_update', freq: currentFreq, mode: currentMode, att: currentAtt, isRecording, squelch: squelchThreshold });
+    const msg = JSON.stringify({ type:'status_update', freq:currentFreq, mode:currentMode, att:currentAtt, isRecording, squelch:squelchThreshold });
     wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN) c.send(msg); });
 }
 function broadcastRecordings() {
     try {
         const d = fs.readdirSync(CONFIG.recordingsPath).filter(f=>f.endsWith('.wav')).map(f=>({name:f, size:fs.statSync(path.join(CONFIG.recordingsPath,f)).size})).sort((a,b)=>b.name.localeCompare(a.name));
-        const msg = JSON.stringify({type:'recordings', data:d});
-        wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN) c.send(msg); });
+        wss.clients.forEach(c => { if(c.readyState===WebSocket.OPEN) c.send(JSON.stringify({type:'recordings', data:d})); });
     } catch(e){}
 }
 
@@ -266,7 +217,6 @@ wss.on('connection', ws => {
             const c = JSON.parse(m);
             if (c.type === 'auth_tune') {
                 if (c.password === CONFIG.password) startRadio(c.freq, c.mode, currentAtt);
-                else ws.send(JSON.stringify({type:'error', msg:'Wrong Password'}));
             }
             else if (c.type === 'set_att') startRadio(currentFreq, currentMode, c.att);
             else if (c.type === 'set_squelch') { squelchThreshold = c.val; squelchDB[currentFreq] = c.val; saveData(); broadcastStatus(); }
@@ -285,314 +235,260 @@ server.listen(CONFIG.webPort, () => {
 });
 
 // ==========================================
-// Modern Frontend (Folder Support)
+// Frontend
 // ==========================================
 const htmlContent = `
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SDR COMMANDER</title>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap">
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
-    <style>
-        :root {
-            --bg-color: #050507; --card-bg: rgba(30, 30, 35, 0.6); --accent-color: #00ffc8;
-            --accent-dim: rgba(0, 255, 200, 0.1); --danger-color: #ff3b30; --text-main: #ffffff;
-            --text-sub: #8b9bb4; --glass-border: 1px solid rgba(255, 255, 255, 0.08); --radius: 16px;
-        }
-        body { background-color: var(--bg-color); color: var(--text-main); font-family: 'Inter', sans-serif; margin: 0; padding: 0; min-height: 100vh; display: flex; justify-content: center; -webkit-tap-highlight-color: transparent; }
-        .app-container { width: 100%; max-width: 480px; padding: 20px 20px 100px 20px; box-sizing: border-box; }
-        .glass-panel { background: var(--card-bg); backdrop-filter: blur(12px); border: var(--glass-border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
-        
-        .freq-display { text-align: center; padding: 20px 0; }
-        .freq-main { font-family: 'JetBrains Mono', monospace; font-size: 3.5rem; font-weight: 700; color: var(--text-main); text-shadow: 0 0 20px var(--accent-dim); line-height: 1; }
-        .freq-unit { color: var(--text-sub); font-size: 0.9rem; font-weight: 600; margin-top: 4px; letter-spacing: 2px; }
-        
-        .badges { display: flex; justify-content: center; gap: 8px; margin-bottom: 10px; }
-        .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--text-sub); font-weight: 600; border: 1px solid rgba(255,255,255,0.05); }
-        .badge.active { background: var(--accent-dim); color: var(--accent-color); border-color: var(--accent-color); }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>SDR COMMANDER</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+<style>
+    :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; }
+    body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+    .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
+    .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
+    
+    .freq { font-family: 'JetBrains Mono', monospace; font-size: 3.2rem; text-align: center; font-weight: 700; line-height: 1; text-shadow: 0 0 20px var(--acc-dim); margin: 15px 0; }
+    .badges { display: flex; justify-content: center; gap: 8px; }
+    .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.05); color: var(--sub); border: 1px solid rgba(255,255,255,0.05); }
+    
+    .meter { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; position: relative; margin-top: 20px; overflow: hidden; }
+    .fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2196f3, var(--acc)); transition: width 0.08s; }
+    .mark { position: absolute; top:0; bottom:0; width: 2px; background: #ffd700; z-index: 2; transition: left 0.1s; }
+    
+    .ctrls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+    .btn { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--txt); padding: 14px; border-radius: 12px; font-weight: 600; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 6px; font-size: 0.9rem; transition: background 0.1s; }
+    .btn:active { background: rgba(255,255,255,0.15); transform: scale(0.98); }
+    .btn.active { background: var(--acc-dim); border-color: var(--acc); color: var(--acc); }
+    .btn-tune { grid-column: span 2; background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05)); }
+    .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
+    @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
 
-        .meter-container { margin-top: 20px; position: relative; }
-        .meter-track { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; position: relative; }
-        .meter-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #2196f3, var(--accent-color)); transition: width 0.08s ease-out; box-shadow: 0 0 10px var(--accent-color); }
-        .sq-marker { position: absolute; top: -4px; bottom: -4px; width: 2px; background: #ffd700; z-index: 2; transition: left 0.1s; box-shadow: 0 0 5px #ffd700; }
-        .sq-controls { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
-        .sq-icon { color: var(--text-sub); font-size: 1.2rem; }
-        input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
-        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 18px; width: 18px; border-radius: 50%; background: #fff; cursor: pointer; margin-top: -7px; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
-        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: rgba(255,255,255,0.15); border-radius: 2px; }
+    input[type=range] { width: 100%; -webkit-appearance: none; background: transparent; margin-top: 15px; }
+    input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 20px; width: 20px; border-radius: 50%; background: #fff; margin-top: -8px; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
+    input[type=range]::-webkit-slider-runnable-track { height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; }
 
-        .control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-        .btn { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); color: var(--text-main); padding: 14px; border-radius: 12px; font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px; }
-        .btn:active { transform: scale(0.96); }
-        .btn.active { background: var(--accent-dim); border-color: var(--accent-color); color: var(--accent-color); }
-        .btn-tune { grid-column: span 2; background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05)); font-size: 1rem; }
-        .btn-rec.recording { background: var(--danger-color); color: #fff; box-shadow: 0 0 20px rgba(255, 59, 48, 0.4); animation: pulse 2s infinite; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+    .tree { display: flex; flex-direction: column; gap: 2px; }
+    .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; }
+    .row:hover { background: rgba(255,255,255,0.05); }
+    .row:active { background: rgba(255,255,255,0.08); }
+    .folder-c { margin-left: 10px; border-left: 2px solid rgba(255,255,255,0.1); padding-left: 10px; display: none; }
+    .folder-c.open { display: block; }
+    .icon { color: var(--sub); font-size: 1.2rem; transition: transform 0.2s; }
+    .icon.rot { transform: rotate(90deg); }
+    .txt { display: flex; flex-direction: column; }
+    .sub { font-size: 0.8rem; color: var(--sub); }
+    .act { display: flex; gap: 4px; }
+    .ib { background: transparent; border: none; color: var(--sub); padding: 8px; cursor: pointer; border-radius: 50%; }
+    .ib:active { background: rgba(255,255,255,0.1); color: #fff; }
 
-        /* Start Overlay */
-        .start-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(5, 5, 7, 0.95); backdrop-filter: blur(10px); z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: opacity 0.3s; }
-        .start-btn { background: var(--accent-color); color: #000; border: none; padding: 18px 40px; border-radius: 50px; font-size: 1.2rem; font-weight: 800; box-shadow: 0 0 30px var(--accent-color); cursor: pointer; letter-spacing: 1px; }
-
-        /* Modal */
-        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); z-index: 1000; display: none; justify-content: center; align-items: flex-end; }
-        .modal-card { background: #1a1b20; width: 100%; max-width: 480px; border-top-left-radius: 24px; border-top-right-radius: 24px; padding: 30px; box-sizing: border-box; box-shadow: 0 -10px 40px rgba(0,0,0,0.5); animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
-        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
-        .modern-input { width: 100%; background: #27282e; border: 2px solid transparent; padding: 16px; border-radius: 12px; color: #fff; font-size: 1.2rem; outline: none; transition: 0.2s; box-sizing: border-box; margin-bottom: 20px; }
-        .modern-input:focus { border-color: var(--accent-color); background: #2d2e36; }
-        .modal-actions { display: flex; gap: 12px; }
-        .btn-primary { background: var(--accent-color); color: #000; flex: 1; border:none; }
-        .btn-secondary { background: #333; color: #fff; flex: 1; border:none; }
-
-        /* Bookmark Tree Styles */
-        .bm-tree { display: flex; flex-direction: column; gap: 4px; }
-        .bm-folder-header { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.03); border-radius: 8px; cursor: pointer; transition: background 0.2s; }
-        .bm-folder-header:hover { background: rgba(255,255,255,0.06); }
-        .bm-folder-icon { color: var(--text-sub); margin-right: 10px; transition: transform 0.2s; }
-        .bm-folder-icon.open { transform: rotate(90deg); }
-        .bm-folder-title { font-weight: 600; color: #fff; flex: 1; }
-        .bm-children { margin-left: 14px; padding-left: 14px; border-left: 2px solid rgba(255,255,255,0.1); display: none; margin-top: 4px; }
-        .bm-children.open { display: block; }
-        
-        .bm-item { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-radius: 8px; cursor: pointer; }
-        .bm-item:hover { background: rgba(255,255,255,0.03); }
-        .bm-info { display: flex; flex-direction: column; }
-        .bm-name { font-weight: 600; color: #fff; }
-        .bm-freq { color: var(--text-sub); font-size: 0.85rem; margin-top: 2px; }
-        .bm-actions { opacity: 0.7; }
-        .icon-btn { background: transparent; border: none; color: var(--text-sub); padding: 8px; cursor: pointer; border-radius: 50%; }
-        .icon-btn:hover { color: #fff; background: rgba(255,255,255,0.1); }
-        
-        .section-header { display: flex; justify-content: space-between; align-items: center; margin: 24px 4px 8px 4px; }
-        .section-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; color: var(--text-sub); }
-    </style>
+    .ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); backdrop-filter:blur(8px); display:none; justify-content:center; align-items:flex-end; z-index: 1000; }
+    .card { background: #1a1b20; width:100%; max-width:480px; padding:30px; border-radius:24px 24px 0 0; box-shadow: 0 -10px 40px #000; animation: up 0.3s; }
+    @keyframes up { from{transform:translateY(100%)}to{transform:translateY(0)} }
+    .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
+    .inp:focus { outline: 2px solid var(--acc); }
+    
+    .start-ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:#050507; z-index: 2000; display:flex; justify-content:center; align-items:center; flex-direction:column; transition: opacity 0.3s; }
+    .big-btn { background: var(--acc); color: #000; border: none; padding: 18px 40px; border-radius: 50px; font-size: 1.2rem; font-weight: 800; box-shadow: 0 0 30px var(--acc); }
+</style>
 </head>
 <body>
-    <div class="start-overlay" id="startOverlay">
-        <div style="font-size: 3rem; margin-bottom: 20px;">📡</div>
-        <button class="start-btn" onclick="initApp()">CONNECT SYSTEM</button>
+    <div class="start-ovl" id="startScreen">
+        <div style="font-size:3rem; margin-bottom:20px;">📡</div>
+        <button class="big-btn" onclick="window.ui.init()">CONNECT SYSTEM</button>
     </div>
 
-    <div class="app-container">
-        <div class="glass-panel">
+    <div class="app">
+        <div class="panel">
             <div class="badges">
-                <span class="badge" id="modeBadge">AM</span>
-                <span class="badge" id="attBadge" style="display:none">ATT</span>
-                <span class="badge" id="recBadge" style="display:none; color:var(--danger-color); border-color:var(--danger-color)">REC</span>
+                <span class="badge" id="bdgMode">AM</span>
+                <span class="badge" id="bdgAtt" style="display:none">ATT</span>
             </div>
-            <div class="freq-display">
-                <div class="freq-main" id="freqVal">---.---</div>
-                <div class="freq-unit">MEGAHERTZ</div>
-            </div>
-            <div class="meter-container">
-                <div class="meter-track">
-                    <div class="meter-bar" id="rssiBar"></div>
-                    <div class="sq-marker" id="sqMarker" style="left: 10%"></div>
-                </div>
-                <div class="sq-controls">
-                    <span class="material-symbols-outlined sq-icon">graphic_eq</span>
-                    <input type="range" id="sqRange" min="0" max="60" value="10" oninput="ui.updateSq(this.value)" onchange="ws.sendSq(this.value)">
-                </div>
+            <div class="freq" id="dspFreq">---.---</div>
+            <div class="meter"><div class="fill" id="dspRssi"></div><div class="mark" id="dspSq" style="left:10%"></div></div>
+            <div style="display:flex; align-items:center; gap:10px; margin-top:5px;">
+                <span class="material-symbols-outlined" style="color:var(--sub)">graphic_eq</span>
+                <input type="range" id="inpSq" min="0" max="60" value="10" oninput="window.ui.updSq(this.value)" onchange="window.ws.sendSq(this.value)">
             </div>
         </div>
 
-        <div class="control-grid">
-            <button class="btn btn-tune" onclick="ui.modal('tune')"><span class="material-symbols-outlined">dialpad</span> TUNE FREQUENCY</button>
-            <button class="btn active" id="btnAM" onclick="ws.setMode('AM')">AM</button>
-            <button class="btn" id="btnFM" onclick="ws.setMode('FM')">FM</button>
-            <button class="btn active" id="attOff" onclick="ws.setAtt('off')">NO ATT</button>
-            <button class="btn" id="attWeak" onclick="ws.setAtt('weak')">WEAK</button>
-            <button class="btn btn-rec" id="recBtn" onclick="ws.toggleRec()"><span class="material-symbols-outlined">fiber_manual_record</span> REC</button>
+        <div class="ctrls">
+            <button class="btn btn-tune" onclick="window.ui.modal(true)"><span class="material-symbols-outlined">dialpad</span> TUNE</button>
+            <button class="btn active" id="btnAM" onclick="window.ws.setMode('AM')">AM</button>
+            <button class="btn" id="btnFM" onclick="window.ws.setMode('FM')">FM</button>
+            <button class="btn active" id="attOff" onclick="window.ws.setAtt('off')">NO ATT</button>
+            <button class="btn" id="attWeak" onclick="window.ws.setAtt('weak')">WEAK</button>
+            <button class="btn" id="btnRec" onclick="window.ws.togRec()"><span class="material-symbols-outlined">fiber_manual_record</span> REC</button>
         </div>
 
-        <div class="section-header">
-            <span class="section-title">CHANNELS</span>
-            <button class="icon-btn" onclick="ws.addBookmark(null)"><span class="material-symbols-outlined">add</span></button>
-        </div>
-        <div class="glass-panel" id="bmList"></div>
+        <div style="color:var(--sub); font-size:0.8rem; margin:20px 0 5px;">BOOKMARKS</div>
+        <div class="panel" id="listBM" style="padding:10px;"></div>
 
-        <div class="section-header"><span class="section-title">RECORDINGS</span></div>
-        <div class="glass-panel" id="recList"></div>
+        <div style="color:var(--sub); font-size:0.8rem; margin:20px 0 5px;">RECORDINGS</div>
+        <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
-    <div class="modal-overlay" id="modalOverlay">
-        <div class="modal-card">
-            <div style="font-size:1.2rem; font-weight:700; color:#fff; margin-bottom:20px;">Set Frequency</div>
-            <input type="number" class="modern-input" id="tuneInput" placeholder="128.800" step="0.001">
-            <input type="password" class="modern-input" id="authInput" placeholder="Admin Password">
-            <div class="modal-actions">
-                <button class="btn btn-secondary" onclick="ui.closeModal()">CANCEL</button>
-                <button class="btn btn-primary" onclick="ws.tune()">EXECUTE</button>
+    <div class="ovl" id="modal">
+        <div class="card">
+            <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
+            <input type="number" class="inp" id="inpFreq" placeholder="128.800" step="0.001">
+            <input type="password" class="inp" id="inpPass" placeholder="Password">
+            <div style="display:flex; gap:10px;">
+                <button class="btn" style="flex:1" onclick="window.ui.modal(false)">CANCEL</button>
+                <button class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.tune()">TUNE</button>
             </div>
         </div>
     </div>
 
 <script>
-    let audioCtx; let wsConn; let nextTime = 0;
-    const state = { freq: 0, mode: 'AM', att: 'off', isRec: false };
-    const expandedFolders = new Set(); // Stores IDs of open folders
+    let audioCtx, wsConn, nextTime=0;
+    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set() };
 
-    const ui = {
-        els: { freq: document.getElementById('freqVal'), rssi: document.getElementById('rssiBar'), sqMarker: document.getElementById('sqMarker'), bmList: document.getElementById('bmList'), recList: document.getElementById('recList') },
-        updateStatus(msg) {
-            state.freq = msg.freq; state.mode = msg.mode; state.att = msg.att; state.isRec = msg.isRecording;
-            this.els.freq.innerText = (msg.freq / 1e6).toFixed(3);
-            document.getElementById('modeBadge').innerText = msg.mode;
-            document.getElementById('attBadge').style.display = (msg.att !== 'off') ? 'inline-block' : 'none';
-            document.getElementById('attBadge').innerText = 'ATT ' + msg.att.toUpperCase();
-            document.getElementById('recBadge').style.display = msg.isRecording ? 'inline-block' : 'none';
-            document.getElementById('btnAM').className = 'btn ' + (msg.mode==='AM'?'active':'');
-            document.getElementById('btnFM').className = 'btn ' + (msg.mode==='FM'?'active':'');
-            document.getElementById('recBtn').className = 'btn btn-rec ' + (msg.isRecording?'recording':'');
-            document.getElementById('sqRange').value = msg.squelch; this.updateSq(msg.squelch);
+    // Explicit Global Assignment for HTML onclick
+    window.ui = {
+        els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('dspSq') },
+        init() {
+            audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
+            if(audioCtx.state==='suspended') audioCtx.resume();
+            const o=audioCtx.createOscillator(); const g=audioCtx.createGain();
+            o.connect(g); g.connect(audioCtx.destination); o.frequency.value=10; g.gain.value=0.001; o.start();
+            document.getElementById('startScreen').style.opacity='0';
+            setTimeout(()=>document.getElementById('startScreen').style.display='none',300);
+            window.ws.connect();
         },
-        updateSq(val) { this.els.sqMarker.style.left = ((val/60)*100) + '%'; },
-        modal(type) {
-            document.getElementById('modalOverlay').style.display = 'flex';
-            if(type==='tune') { document.getElementById('tuneInput').value = (state.freq/1e6).toFixed(3); document.getElementById('tuneInput').focus(); }
+        upd(m) {
+            state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording;
+            this.els.freq.innerText = (m.freq/1e6).toFixed(3);
+            document.getElementById('bdgMode').innerText = m.mode;
+            document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
+            document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
+            document.getElementById('btnAM').className = 'btn '+(m.mode==='AM'?'active':'');
+            document.getElementById('btnFM').className = 'btn '+(m.mode==='FM'?'active':'');
+            document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
+            document.getElementById('inpSq').value = m.squelch;
+            this.updSq(m.squelch);
         },
-        closeModal() { document.getElementById('modalOverlay').style.display = 'none'; document.getElementById('authInput').value=''; },
-        
-        // --- Folder Logic ---
+        updSq(v) { this.els.sq.style.left = ((v/60)*100)+'%'; },
+        modal(show) {
+            document.getElementById('modal').style.display = show?'flex':'none';
+            if(show) { document.getElementById('inpFreq').value = (state.freq/1e6).toFixed(3); }
+        },
         renderBM(list) {
-            // Convert flat list to tree
-            const map = {}; const roots = [];
-            list.forEach(item => { map[item.id] = { ...item, children: [] }; });
-            list.forEach(item => {
-                if (item.parentId && map[item.parentId]) map[item.parentId].children.push(map[item.id]);
-                else roots.push(map[item.id]);
-            });
-            this.els.bmList.innerHTML = '<div class="bm-tree">' + this.buildTreeHTML(roots) + '</div>';
+            const d = list || state.bm;
+            const roots = []; const map = {};
+            d.forEach(i => map[i.id] = {...i, c:[]});
+            d.forEach(i => { if(i.parentId && map[i.parentId]) map[i.parentId].c.push(map[i.id]); else roots.push(map[i.id]); });
+            document.getElementById('listBM').innerHTML = this.tree(roots);
         },
-        buildTreeHTML(nodes) {
-            return nodes.map(node => {
-                if (node.isFolder) {
-                    const isOpen = expandedFolders.has(node.id);
+        tree(nodes) {
+            return nodes.map(n => {
+                if(n.isFolder) {
+                    const open = state.expanded.has(n.id);
                     return \`
-                        <div class="bm-folder">
-                            <div class="bm-folder-header" onclick="ui.toggleFolder('\${node.id}')">
-                                <span class="material-symbols-outlined bm-folder-icon \${isOpen ? 'open' : ''}">chevron_right</span>
-                                <span class="bm-folder-title">\${node.title}</span>
-                                <button class="icon-btn" onclick="event.stopPropagation(); ws.addBookmark('\${node.id}')"><span class="material-symbols-outlined">add</span></button>
-                                <button class="icon-btn" onclick="event.stopPropagation(); ws.delBm('\${node.id}')"><span class="material-symbols-outlined">delete</span></button>
+                        <div>
+                            <div class="row" onclick="window.ui.tog('\${n.id}')">
+                                <div style="display:flex; align-items:center;">
+                                    <span class="material-symbols-outlined icon \${open?'rot':''}">chevron_right</span>
+                                    <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
+                                </div>
+                                <div class="act">
+                                    <button class="ib" onclick="event.stopPropagation(); window.ws.add('\${n.id}')"><span class="material-symbols-outlined">add</span></button>
+                                    <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                                </div>
                             </div>
-                            <div class="bm-children \${isOpen ? 'open' : ''}">
-                                \${this.buildTreeHTML(node.children)}
-                            </div>
-                        </div>
-                    \`;
-                } else {
-                    return \`
-                        <div class="bm-item" onclick="ws.tuneDirect(\${node.freq}, '\${node.mode}')">
-                            <div class="bm-info">
-                                <div class="bm-name">\${node.title}</div>
-                                <div class="bm-freq">\${node.freq.toFixed(3)} MHz \${node.mode}</div>
-                            </div>
-                            <div class="bm-actions">
-                                <button class="icon-btn" onclick="event.stopPropagation(); ws.delBm('\${node.id}')"><span class="material-symbols-outlined">delete</span></button>
-                            </div>
-                        </div>
-                    \`;
+                            <div class="folder-c \${open?'open':''}">\${this.tree(n.c)}</div>
+                        </div>\`;
                 }
+                return \`
+                    <div class="row" onclick="window.ws.tuneDir(\${n.freq}, '\${n.mode}')">
+                        <div class="txt">
+                            <span style="font-weight:600;">\${n.title}</span>
+                            <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
+                        </div>
+                        <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                    </div>\`;
             }).join('');
         },
-        toggleFolder(id) {
-            if (expandedFolders.has(id)) expandedFolders.delete(id); else expandedFolders.add(id);
-            // Re-render without fetching to keep state simple
-            ws.reqBookmarks(); 
+        tog(id) {
+            if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
+            this.renderBM();
         },
         renderRec(list) {
-            this.els.recList.innerHTML = list.map(f => \`
-                <div class="list-item" style="padding:12px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.05);">
-                    <div style="display:flex; flex-direction:column;">
-                        <div style="font-weight:600; color:#fff;">\${f.name.split('_')[2]||f.name}</div>
-                        <div style="color:var(--text-sub); font-size:0.8rem;">\${(f.size/1024/1024).toFixed(2)} MB</div>
+            document.getElementById('listRec').innerHTML = list.map(f => \`
+                <div class="row">
+                    <div class="txt">
+                        <span style="font-weight:600;">\${f.name.split('_')[2]||f.name}</span>
+                        <span class="sub">\${(f.size/1024/1024).toFixed(2)} MB</span>
                     </div>
-                    <div>
-                        <a href="/download/\${f.name}" class="icon-btn" download><span class="material-symbols-outlined">download</span></a>
-                        <button class="icon-btn" onclick="ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
+                    <div class="act">
+                        <a href="/download/\${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
+                        <button class="ib" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
-                </div>
-            \`).join('');
+                </div>\`).join('');
         }
     };
 
-    const ws = {
-        s(o) { if(wsConn&&wsConn.readyState===1) wsConn.send(JSON.stringify(o)); },
-        sendSq(v) { this.s({type:'set_squelch', val:parseInt(v)}); },
+    window.ws = {
+        c: null,
+        connect() {
+            this.c = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host);
+            this.c.binaryType = 'arraybuffer';
+            this.c.onmessage = e => {
+                if(typeof e.data === 'string') {
+                    const m = JSON.parse(e.data);
+                    if(m.type==='status_update') window.ui.upd(m);
+                    else if(m.type==='bookmarks') { state.bm = m.data; window.ui.renderBM(); }
+                    else if(m.type==='recordings') window.ui.renderRec(m.data);
+                    else if(m.type==='error') alert(m.msg);
+                } else this.audio(e.data);
+            };
+            this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
+        },
+        send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
+        sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
         setMode(m) { state.mode=m; this.tune(true); },
-        setAtt(a) { this.s({type:'set_att', att:a}); },
-        toggleRec() { this.s({type: state.isRec?'stop_recording':'start_recording'}); },
+        setAtt(a) { this.send({type:'set_att', att:a}); },
+        togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
         tune(skip=false) {
-            let freq = state.freq;
-            if(!skip) { const v = parseFloat(document.getElementById('tuneInput').value); if(v) freq = Math.floor(v*1e6); }
-            this.s({type:'auth_tune', password:document.getElementById('authInput').value, freq, mode:state.mode});
-            ui.closeModal();
+            let f = state.freq;
+            if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
+            const p = document.getElementById('inpPass').value;
+            this.send({type:'auth_tune', password:p, freq:f, mode:state.mode});
+            window.ui.modal(false);
         },
-        tuneDirect(freqMHz, mode) {
-            state.mode = mode;
-            document.getElementById('tuneInput').value = freqMHz;
-            ui.modal('tune');
+        tuneDir(f, m) {
+            // Auto-tune using current or empty password to try
+            const p = document.getElementById('inpPass').value;
+            this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
+            state.mode = m;
         },
-        addBookmark(parentId) {
-            const isFolder = confirm("Create a Folder? (Cancel for Frequency)");
-            const title = prompt(isFolder ? "Folder Name:" : "Station Name:");
-            if(!title) return;
-            const data = { title, isFolder, parentId };
-            if(!isFolder) {
-                data.freq = state.freq / 1e6; // Save as MHz
-                data.mode = state.mode;
-            }
-            this.s({type:'add_bookmark', data});
+        add(pid) {
+            const isF = confirm("Create a Folder? (Cancel for Channel)");
+            const t = prompt(isF?"Folder Name":"Name"); if(!t) return;
+            const d = {title:t, isFolder:isF, parentId:pid};
+            if(!isF) { d.freq = state.freq/1e6; d.mode = state.mode; }
+            this.send({type:'add_bookmark', data:d});
         },
-        delBm(id) { if(confirm('Delete?')) this.s({type:'delete_bookmark', id}); },
-        delRec(fn) { if(confirm('Delete?')) this.s({type:'delete_recording', filename:fn}); },
-        reqBookmarks() { this.s({type:'req_bookmarks'}); /* Triggers re-render */ }
+        del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
+        delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
+        audio(b) {
+            if(!audioCtx) return;
+            const v = new Int16Array(b);
+            const f = new Float32Array(v.length-1);
+            for(let i=0; i<f.length; i++) f[i] = v[i+1]/32768.0;
+            window.ui.els.rssi.style.width = Math.min(100, (v[0]/200)*100)+'%';
+            const buf = audioCtx.createBuffer(1, f.length, 24000);
+            buf.getChannelData(0).set(f);
+            const s = audioCtx.createBufferSource(); s.buffer=buf; s.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+            if(nextTime < now) nextTime = now + 0.04;
+            s.start(nextTime); nextTime += buf.duration;
+        }
     };
-
-    function initApp() {
-        audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
-        if(audioCtx.state==='suspended') audioCtx.resume();
-        const osc=audioCtx.createOscillator(); const g=audioCtx.createGain();
-        osc.connect(g); g.connect(audioCtx.destination); osc.frequency.value=10; g.gain.value=0.001; osc.start();
-        document.getElementById('startOverlay').style.opacity='0';
-        setTimeout(()=>document.getElementById('startOverlay').style.display='none',300);
-        connect();
-    }
-    
-    function connect() {
-        wsConn = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host);
-        wsConn.binaryType = 'arraybuffer';
-        wsConn.onmessage = e => {
-            if(typeof e.data === 'string') {
-                const m = JSON.parse(e.data);
-                if(m.type==='status_update') ui.updateStatus(m);
-                else if(m.type==='bookmarks') ui.renderBM(m.data);
-                else if(m.type==='recordings') ui.renderRec(m.data);
-                else if(m.type==='error') alert(m.msg);
-            } else playAudio(e.data);
-        };
-        wsConn.onclose = () => setTimeout(connect, 3000);
-    }
-    
-    function playAudio(buf) {
-        if(!audioCtx) return;
-        const v = new Int16Array(buf);
-        const rssi = v[0];
-        const f = new Float32Array(v.length-1);
-        for(let i=0; i<f.length; i++) f[i] = v[i+1]/32768.0;
-        
-        ui.els.rssi.style.width = Math.min(100, (rssi/200)*100) + '%';
-        
-        const b = audioCtx.createBuffer(1, f.length, 24000);
-        b.getChannelData(0).set(f);
-        const s = audioCtx.createBufferSource(); s.buffer=b; s.connect(audioCtx.destination);
-        const now = audioCtx.currentTime;
-        if(nextTime < now) nextTime = now + 0.04;
-        s.start(nextTime); nextTime += b.duration;
-    }
 </script>
 </body>
 </html>
