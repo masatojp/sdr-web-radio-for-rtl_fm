@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - ATT MID Adjusted (Gain 10)
+ * Modern Web SDR - Numerical Squelch UI
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -124,11 +124,11 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // Attenuator Logic (Gain Control)
-    let gainVal = '48'; // OFF = Max
-    if (att === 'weak') gainVal = '35';   // WEAK
-    if (att === 'mid')  gainVal = '10';   // MID (Changed to 10)
-    if (att === 'strong') gainVal = '0';  // STRONG
+    // Attenuator Logic
+    let gainVal = '48';
+    if (att === 'weak') gainVal = '35';
+    if (att === 'mid')  gainVal = '10';
+    if (att === 'strong') gainVal = '0';
 
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
     console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
@@ -141,7 +141,6 @@ function startRadio(freq, mode, att) {
 function handleAudio(raw) {
     const res = dsp.process(raw, { squelchThreshold });
     const head = new Int16Array(1); head[0] = res.rssi;
-    // Embed Squelch Status
     const statusWord = res.isOpen ? 1 : 0; 
     const combo = Buffer.alloc(raw.length + 4); 
     combo.writeInt16LE(res.rssi, 0);
@@ -268,20 +267,13 @@ const htmlContent = `
     .meter-wrap { position: relative; height: 36px; margin-top: 20px; display: flex; align-items: center; }
     .meter-bg { position: absolute; left: 0; right: 0; top: 12px; bottom: 12px; background: rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; }
     .meter-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2196f3, var(--acc)); transition: width 0.05s ease-out; }
-    
-    input[type=range] { 
-        position: absolute; left: 0; width: 100%; height: 100%; 
-        -webkit-appearance: none; background: transparent; margin: 0; z-index: 10; cursor: pointer;
-    }
-    input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 100%; background: transparent; }
-    input[type=range]::-webkit-slider-thumb { 
-        -webkit-appearance: none; 
-        height: 36px; width: 4px; 
-        background: #ffd700; border-radius: 2px;
-        box-shadow: 0 0 10px #ffd700;
-        margin-top: 0px; 
-    }
-    .sq-label { text-align: center; font-size: 0.7rem; color: var(--sub); margin-top: 4px; }
+    .sq-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: #ffd700; z-index: 5; transition: left 0.1s; box-shadow: 0 0 5px #ffd700; }
+
+    .sq-ctrl-row { display: flex; justify-content: space-between; align-items: center; margin-top: 15px; }
+    .sq-val-display { font-family: 'JetBrains Mono', monospace; font-size: 1rem; color: #ffd700; font-weight: bold; }
+    .sq-btn-group { display: flex; gap: 4px; }
+    .btn-sq { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.1); color: var(--txt); padding: 8px 0; width: 36px; border-radius: 6px; font-size: 0.75rem; cursor: pointer; text-align: center; }
+    .btn-sq:active { background: var(--acc); color: #000; border-color: var(--acc); }
 
     .ctrls { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
     .btn-row { display: flex; gap: 8px; width: 100%; }
@@ -334,9 +326,20 @@ const htmlContent = `
             
             <div class="meter-wrap">
                 <div class="meter-bg"><div class="meter-fill" id="dspRssi"></div></div>
-                <input type="range" id="inpSq" min="0" max="60" value="10" oninput="window.ui.updSq(this.value)" onchange="window.ws.sendSq(this.value)">
+                <div class="sq-mark" id="sqMarker" style="left:10%"></div>
             </div>
-            <div class="sq-label">SQUELCH THRESHOLD</div>
+            
+            <div class="sq-ctrl-row">
+                <div style="font-size:0.8rem; color:var(--sub);">SQL <span id="valSq" class="sq-val-display">10</span></div>
+                <div class="sq-btn-group">
+                    <button class="btn-sq" onclick="window.ui.adjSq(-10)">-10</button>
+                    <button class="btn-sq" onclick="window.ui.adjSq(-5)">-5</button>
+                    <button class="btn-sq" onclick="window.ui.adjSq(-1)">-1</button>
+                    <button class="btn-sq" onclick="window.ui.adjSq(1)">+1</button>
+                    <button class="btn-sq" onclick="window.ui.adjSq(5)">+5</button>
+                    <button class="btn-sq" onclick="window.ui.adjSq(10)">+10</button>
+                </div>
+            </div>
         </div>
 
         <div class="ctrls">
@@ -377,10 +380,10 @@ const htmlContent = `
 
 <script>
     let audioCtx, wsConn, nextTime=0;
-    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set() };
+    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10 };
 
     window.ui = {
-        els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi') },
+        els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
         modalMode: 'AM',
         init() {
             audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
@@ -392,7 +395,7 @@ const htmlContent = `
             window.ws.connect();
         },
         upd(m) {
-            state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording;
+            state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
             this.els.freq.innerText = (m.freq/1e6).toFixed(3);
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
@@ -403,9 +406,19 @@ const htmlContent = `
             });
             
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
-            document.getElementById('inpSq').value = m.squelch;
+            this.renderSq(m.squelch);
         },
-        updSq(v) { /* handled by css */ },
+        renderSq(v) {
+            this.els.sq.style.left = v + '%'; // 0-100 direct mapping
+            this.els.valSq.innerText = v;
+        },
+        adjSq(delta) {
+            let n = state.squelch + delta;
+            if (n < 0) n = 0; if (n > 100) n = 100;
+            state.squelch = n;
+            this.renderSq(n);
+            window.ws.sendSq(n);
+        },
         modal(show) {
             document.getElementById('modal').style.display = show?'flex':'none';
             if(show) { 
