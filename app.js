@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Auto-Start Audio Fix
+ * Modern Web SDR - Final Fixed Version
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -166,7 +166,7 @@ function startRadio(freq, mode, att) {
     // Attenuator Logic (Gain Control)
     let gainVal = '48'; // OFF = Max
     if (att === 'weak') gainVal = '35';   // WEAK
-    if (att === 'mid')  gainVal = '10';   // MID (10)
+    if (att === 'mid')  gainVal = '10';   // MID
     if (att === 'strong') gainVal = '0';  // STRONG
 
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
@@ -358,9 +358,17 @@ const htmlContent = `
     @keyframes up { from{transform:translateY(100%)}to{transform:translateY(0)} }
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
+    
+    .start-ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:#050507; z-index: 2000; display:flex; justify-content:center; align-items:center; flex-direction:column; transition: opacity 0.3s; }
+    .big-btn { background: var(--acc); color: #000; border: none; padding: 18px 40px; border-radius: 50px; font-size: 1.2rem; font-weight: 800; box-shadow: 0 0 30px var(--acc); cursor: pointer; }
 </style>
 </head>
 <body>
+    <div class="start-ovl" id="startScreen">
+        <div style="font-size:3rem; margin-bottom:20px;">📡</div>
+        <button class="big-btn" onclick="window.ui.init()">CONNECT SYSTEM</button>
+    </div>
+
     <div class="app">
         <div class="panel">
             <div class="badges">
@@ -461,8 +469,9 @@ const htmlContent = `
         targetParent: null,
         addType: 'freq',
 
+        // --- BACKGROUND AUDIO MAGIC ---
         init() {
-            // Auto-start audio context on first interaction
+            // Auto-start on ANY interaction
             const unlock = () => {
                 if(!audioCtx) {
                     audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
@@ -471,7 +480,7 @@ const htmlContent = `
                     const dest = audioCtx.createMediaStreamDestination();
                     const audioEl = document.getElementById('audioBridge');
                     audioEl.srcObject = dest.stream;
-                    audioEl.play();
+                    audioEl.play().catch(e => console.log("Waiting for user gesture"));
                     window.audioDest = dest;
 
                     // Keep-alive silent oscillator
@@ -488,9 +497,12 @@ const htmlContent = `
                 }
                 if(audioCtx.state==='suspended') audioCtx.resume();
             };
-            document.body.addEventListener('click', unlock, {once:true});
-            document.body.addEventListener('touchstart', unlock, {once:true});
-            document.body.addEventListener('keydown', unlock, {once:true});
+            
+            // Listen to any touch/click/key to unlock audio
+            ['click','touchstart','keydown','scroll'].forEach(e => document.body.addEventListener(e, unlock, {once:true}));
+
+            // Hide start screen immediately
+            document.getElementById('startScreen').style.display='none';
 
             // Connect WS immediately
             window.ws.connect();
