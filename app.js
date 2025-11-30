@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Instant Squelch Edition
+ * Modern Web SDR - ATT & Tune Mode Update
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -14,9 +14,9 @@ const { spawn } = require('child_process');
 // ==========================================
 const CONFIG = {
     webPort: 3000,
-    password: "admin",
+    password: "admin", // ★パスワード
     
-    // SDR初期設定 (仙台空港ATIS)
+    // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
     sampleRate: 24000,
@@ -40,18 +40,8 @@ const defaultBookmarks = [
   { "title": "Sendai Airport", "isFolder": true, "parentId": null, "id": "1763731824815" },
   { "title": "SDJ ATIS", "freq": 126.45, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731847585" },
   { "title": "SDJ TWR", "freq": 118.7, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731881249" },
-  { "title": "SDJ GND", "freq": 121.7, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731893279" },
-  { "title": "SDJ APP", "freq": 120.4, "mode": "AM", "isFolder": false, "parentId": "1763731912991", "id": "1763731912991" },
   { "title": "Sendai FM Radio", "isFolder": true, "parentId": null, "id": "1763731929504" },
-  { "title": "NHK-FM Sendai", "freq": 82.5, "mode": "FM", "isFolder": false, "parentId": "1763731929504", "id": "1763731963953" },
-  { "title": "TBC FM", "freq": 93.5, "mode": "FM", "isFolder": false, "parentId": "1763731929504", "id": "1763731978016" },
-  { "title": "Date FM", "freq": 77.1, "mode": "FM", "isFolder": false, "parentId": "1763731929504", "id": "1763732002721" },
-  { "title": "Tokyo International Airport", "isFolder": true, "parentId": null, "id": "1764429116145" },
-  { "title": "HND TWR RWY-A", "freq": 118.1, "mode": "AM", "isFolder": false, "parentId": "1764429116145", "id": "1764429162285" },
-  { "title": "HND TWR RWY-B", "freq": 118.575, "mode": "AM", "isFolder": false, "parentId": "1764429116145", "id": "1764429393136" },
-  { "title": "HND TWR RWY-C", "freq": 124.35, "mode": "AM", "isFolder": false, "parentId": "1764429116145", "id": "1764429422892" },
-  { "title": "HND TWR RWY-D", "freq": 118.725, "mode": "AM", "isFolder": false, "parentId": "1764429116145", "id": "1764429456968" },
-  { "title": "HND ATIS", "freq": 128.8, "mode": "AM", "isFolder": false, "parentId": "1764429116145", "id": "1764429481611" }
+  { "title": "Date FM", "freq": 77.1, "mode": "FM", "isFolder": false, "parentId": "1763731929504", "id": "1763732002721" }
 ];
 
 function loadData() {
@@ -68,17 +58,14 @@ function saveData() {
 loadData();
 
 // ==========================================
-// DSP (Audio Processing)
+// DSP (Audio Processing) - Instant Squelch
 // ==========================================
 class AudioDSP {
     constructor() { this.reset(); }
     reset() { 
-        this.lastIn=0; 
-        this.lastOut=0; 
-        this.agcPeak=0; 
-        this.agcGain=1.0; 
-        this.squelchGate=0.0; // 0.0=Muted, 1.0=Open
-        this.rms=0; 
+        this.lastIn=0; this.lastOut=0; 
+        this.agcPeak=0; this.agcGain=1.0; 
+        this.squelchGate=0.0; this.rms=0; 
     }
     process(inputBuffer, opts) {
         const len = inputBuffer.length / 2;
@@ -88,11 +75,11 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            // HPF (DC Cut)
+            // HPF
             let raw = s; s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; this.lastIn = raw; this.lastOut = s;
             sumSq += s * s;
             
-            // AGC (Auto Gain Control)
+            // AGC
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.6 / (this.agcPeak + 0.05);
             if (g > 15.0) g = 15.0; if (g < 1.0) g = 1.0;
@@ -101,26 +88,19 @@ class AudioDSP {
             // Apply Gate & Gain
             let p = s * this.agcGain * this.squelchGate;
             
-            // Hard Limiter
+            // Limiter
             if (p > 0.98) p = 0.98; if (p < -0.98) p = -0.98;
             out.writeInt16LE(Math.floor(p * 32767), i * 2);
         }
 
-        // Calculate RMS for Squelch Logic
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.8 + rms * 0.2;
 
-        // --- Instant Squelch Logic ---
-        // Minimum floor to prevent opening on pure silence
+        // Instant Squelch Logic
         const open = Math.max(0.005, sqThresh); 
-        const close = open * 0.8; // Hysteresis
-
-        if (this.rms > open) {
-            this.squelchGate = 1.0; // Instant Open
-        } else if (this.rms < close) {
-            this.squelchGate = 0.0; // Instant Close
-        }
-        // If between thresholds, maintain previous state (No change)
+        const close = open * 0.8; 
+        if (this.rms > open) this.squelchGate = 1.0;
+        else if (this.rms < close) this.squelchGate = 0.0;
 
         return { 
             buffer: out, 
@@ -147,12 +127,16 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    let gainVal = '40';
-    if (att === 'weak') gainVal = '20';
-    if (att === 'strong') gainVal = '0';
+    // Attenuator Logic (Gain Control)
+    let gainVal = '48'; // OFF = Max Gain (Highest Sensitivity)
+    if (att === 'weak') gainVal = '20';   // WEAK = Mid Gain
+    if (att === 'strong') gainVal = '0';  // STRONG = Min Gain (Local strong signal only)
 
-    const args = ['-M', mode === 'FM' ? 'fm' : 'am', '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
-    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz`);
+    // Mode argument
+    const modeArg = (mode === 'FM') ? 'fm' : 'am';
+
+    const args = ['-M', modeArg, '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
+    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
     
     rtlProcess = spawn('rtl_fm', args);
     rtlProcess.stdout.on('data', (c) => handleAudio(c));
@@ -299,7 +283,7 @@ const htmlContent = `
     .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; transition: background 0.1s; }
     .row:hover { background: rgba(255,255,255,0.05); }
     .row:active { background: rgba(255,255,255,0.08); }
-    .row-click-area { display: flex; align-items: center; flex: 1; height: 100%; } /* Click target expander */
+    .row-click-area { display: flex; align-items: center; flex: 1; height: 100%; } 
     .folder-c { margin-left: 10px; border-left: 2px solid rgba(255,255,255,0.1); padding-left: 10px; display: none; }
     .folder-c.open { display: block; }
     .icon { color: var(--sub); font-size: 1.2rem; transition: transform 0.2s; }
@@ -342,10 +326,9 @@ const htmlContent = `
 
         <div class="ctrls">
             <button class="btn btn-tune" onclick="window.ui.modal(true)"><span class="material-symbols-outlined">dialpad</span> TUNE</button>
-            <button class="btn active" id="btnAM" onclick="window.ws.setMode('AM')">AM</button>
-            <button class="btn" id="btnFM" onclick="window.ws.setMode('FM')">FM</button>
             <button class="btn active" id="attOff" onclick="window.ws.setAtt('off')">NO ATT</button>
             <button class="btn" id="attWeak" onclick="window.ws.setAtt('weak')">WEAK</button>
+            <button class="btn" id="attStrong" onclick="window.ws.setAtt('strong')">STRONG</button>
             <button class="btn" id="btnRec" onclick="window.ws.togRec()"><span class="material-symbols-outlined">fiber_manual_record</span> REC</button>
         </div>
 
@@ -360,6 +343,10 @@ const htmlContent = `
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
             <input type="number" class="inp" id="inpFreq" placeholder="128.800" step="0.001">
+            <div style="display:flex; gap:10px; margin-bottom:15px;">
+                <button class="btn" id="modAM" style="flex:1" onclick="window.ui.selMod('AM')">AM</button>
+                <button class="btn" id="modFM" style="flex:1" onclick="window.ui.selMod('FM')">FM</button>
+            </div>
             <input type="password" class="inp" id="inpPass" placeholder="Password (required)">
             <div style="display:flex; gap:10px;">
                 <button class="btn" style="flex:1" onclick="window.ui.modal(false)">CANCEL</button>
@@ -374,6 +361,7 @@ const htmlContent = `
 
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('dspSq') },
+        modalMode: 'AM',
         init() {
             audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
             if(audioCtx.state==='suspended') audioCtx.resume();
@@ -389,8 +377,12 @@ const htmlContent = `
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
             document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
-            document.getElementById('btnAM').className = 'btn '+(m.mode==='AM'?'active':'');
-            document.getElementById('btnFM').className = 'btn '+(m.mode==='FM'?'active':'');
+            
+            // ATT Buttons
+            document.getElementById('attOff').className = 'btn '+(m.att==='off'?'active':'');
+            document.getElementById('attWeak').className = 'btn '+(m.att==='weak'?'active':'');
+            document.getElementById('attStrong').className = 'btn '+(m.att==='strong'?'active':'');
+            
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             document.getElementById('inpSq').value = m.squelch;
             this.updSq(m.squelch);
@@ -400,8 +392,14 @@ const htmlContent = `
             document.getElementById('modal').style.display = show?'flex':'none';
             if(show) { 
                 document.getElementById('inpFreq').value = (state.freq/1e6).toFixed(3); 
+                this.selMod(state.mode); // Sync modal mode with current
                 document.getElementById('inpPass').focus();
             }
+        },
+        selMod(m) {
+            this.modalMode = m;
+            document.getElementById('modAM').className = 'btn '+(m==='AM'?'active':'');
+            document.getElementById('modFM').className = 'btn '+(m==='FM'?'active':'');
         },
         renderBM(list) {
             const d = list || state.bm;
@@ -485,9 +483,11 @@ const htmlContent = `
         togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
         tune(skip=false) {
             let f = state.freq;
+            // Get selected mode from UI Modal state
+            const m = window.ui.modalMode; 
             if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
             const p = document.getElementById('inpPass').value;
-            this.send({type:'auth_tune', password:p, freq:f, mode:state.mode});
+            this.send({type:'auth_tune', password:p, freq:f, mode:m});
             window.ui.modal(false);
         },
         tuneDir(f, m) {
