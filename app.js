@@ -1,9 +1,11 @@
 /**
- * Modern Web SDR - Squelch Visualizer & Numeric Control
+ * Modern Web SDR - Discord Notification Edition
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
+require('dotenv').config(); // Load .env file
 const http = require('http');
+const https = require('https'); // For Discord Webhook
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
@@ -29,6 +31,59 @@ const CONFIG = {
 };
 
 if (!fs.existsSync(CONFIG.recordingsPath)) fs.mkdirSync(CONFIG.recordingsPath);
+
+// ==========================================
+// Discord Notification Function
+// ==========================================
+function sendDiscordNotification() {
+    const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+    if (!webhookUrl) {
+        console.log("[System] Discord Webhook URL not set. Skipping notification.");
+        return;
+    }
+
+    const payload = JSON.stringify({
+        username: "SDR Commander",
+        avatar_url: "https://cdn-icons-png.flaticon.com/512/3659/3659738.png", // Icon (Radio Tower)
+        embeds: [{
+            title: "📡 System Started",
+            description: "SDR Web Receiver is now online.",
+            color: 5814783, // Green
+            fields: [
+                { name: "Port", value: CONFIG.webPort.toString(), inline: true },
+                { name: "Initial Freq", value: `${(CONFIG.initialFreq/1e6).toFixed(3)} MHz`, inline: true },
+                { name: "Mode", value: CONFIG.initialMode, inline: true }
+            ],
+            timestamp: new Date().toISOString()
+        }]
+    });
+
+    const urlObj = new URL(webhookUrl);
+    const options = {
+        hostname: urlObj.hostname,
+        path: urlObj.pathname + urlObj.search,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload)
+        }
+    };
+
+    const req = https.request(options, (res) => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+            console.log("[System] Discord Notification Sent.");
+        } else {
+            console.error(`[System] Discord Error: Status ${res.statusCode}`);
+        }
+    });
+
+    req.on('error', (e) => {
+        console.error(`[System] Discord Request Failed: ${e.message}`);
+    });
+
+    req.write(payload);
+    req.end();
+}
 
 // ==========================================
 // データ管理
@@ -248,6 +303,7 @@ wss.on('connection', ws => {
 server.listen(CONFIG.webPort, () => {
     console.log(`[System] Interface Ready: http://localhost:${CONFIG.webPort}`);
     startRadio(CONFIG.initialFreq, CONFIG.initialMode, 'off');
+    sendDiscordNotification(); // Notify on startup
 });
 
 // ==========================================
@@ -274,7 +330,6 @@ const htmlContent = `
     .badge-sql { background: var(--mute); color: #ccc; }
     .badge-sql.open { background: var(--open); color: #000; box-shadow: 0 0 10px var(--open); font-weight: bold; }
     
-    /* Improved Meter */
     .meter-wrap { position: relative; height: 32px; margin-top: 20px; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; overflow: hidden; background: #111; }
     .meter-fill { height: 100%; width: 0%; background: var(--mute); transition: width 0.05s ease-out, background 0.1s; }
     .meter-fill.active { background: var(--open); box-shadow: 0 0 15px var(--open); }
@@ -622,7 +677,6 @@ const htmlContent = `
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
             
-            // Meter Color Logic: Gray if muted, Green if open
             const bar = window.ui.els.rssi;
             bar.style.width = Math.min(100, (rssi/200)*100)+'%';
             if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
