@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Background Playback & Instant Start
+ * Modern Web SDR - Auto-Start Audio Fix
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -132,6 +132,7 @@ class AudioDSP {
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.8 + rms * 0.2;
 
+        // Instant Squelch Logic
         const open = Math.max(0.005, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -162,13 +163,14 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    let gainVal = '48';
-    if (att === 'weak') gainVal = '35';
-    if (att === 'mid')  gainVal = '10';
-    if (att === 'strong') gainVal = '0';
+    // Attenuator Logic (Gain Control)
+    let gainVal = '48'; // OFF = Max
+    if (att === 'weak') gainVal = '35';   // WEAK
+    if (att === 'mid')  gainVal = '10';   // MID (10)
+    if (att === 'strong') gainVal = '0';  // STRONG
 
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
-    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}`);
+    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
     
     rtlProcess = spawn('rtl_fm', args);
     rtlProcess.stdout.on('data', (c) => handleAudio(c));
@@ -446,7 +448,7 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" style="display:none;"></audio>
+    <audio id="audioBridge" style="display:none;" playsinline></audio>
 
 <script>
     let audioCtx, wsConn;
@@ -459,56 +461,39 @@ const htmlContent = `
         targetParent: null,
         addType: 'freq',
 
-        // --- BACKGROUND AUDIO MAGIC ---
         init() {
-            // One-time interaction handler
-            document.body.addEventListener('click', this.startAudioContext, { once: true });
-            document.body.addEventListener('touchstart', this.startAudioContext, { once: true });
-            
-            // Immediately attempt connection visually
+            // Auto-start audio context on first interaction
+            const unlock = () => {
+                if(!audioCtx) {
+                    audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
+                    
+                    // Audio Bridge for background playback
+                    const dest = audioCtx.createMediaStreamDestination();
+                    const audioEl = document.getElementById('audioBridge');
+                    audioEl.srcObject = dest.stream;
+                    audioEl.play();
+                    window.audioDest = dest;
+
+                    // Keep-alive silent oscillator
+                    const osc = audioCtx.createOscillator();
+                    const g = audioCtx.createGain();
+                    osc.connect(g); g.connect(dest);
+                    osc.frequency.value=10; g.gain.value=0.001; osc.start();
+
+                    // Media Session
+                    if('mediaSession' in navigator) {
+                        navigator.mediaSession.metadata = new MediaMetadata({title:'SDR Monitor', artist:'Receiving'});
+                        navigator.mediaSession.setActionHandler('play', ()=>{ audioCtx.resume(); audioEl.play(); });
+                    }
+                }
+                if(audioCtx.state==='suspended') audioCtx.resume();
+            };
+            document.body.addEventListener('click', unlock, {once:true});
+            document.body.addEventListener('touchstart', unlock, {once:true});
+            document.body.addEventListener('keydown', unlock, {once:true});
+
+            // Connect WS immediately
             window.ws.connect();
-        },
-
-        startAudioContext() {
-            if (audioCtx) return; // Already started
-
-            // 1. Create Audio Context
-            audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
-            
-            // 2. Resume if suspended (common on iOS)
-            if(audioCtx.state==='suspended') audioCtx.resume();
-
-            // 3. Create Audio Element Bridge (Crucial for background)
-            const dest = audioCtx.createMediaStreamDestination();
-            const audioEl = document.getElementById('audioBridge');
-            audioEl.srcObject = dest.stream;
-            audioEl.play().catch(e => console.log("Audio play failed (waiting for interaction)", e));
-
-            // 4. Connect Silent Oscillator to Keep Alive
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.connect(gain);
-            gain.connect(dest); // Connect to bridge, not direct destination
-            osc.frequency.value = 10; 
-            gain.gain.value = 0.001;
-            osc.start();
-
-            // 5. Setup Media Session
-            if ('mediaSession' in navigator) {
-                navigator.mediaSession.metadata = new MediaMetadata({
-                    title: 'SDR Receiver',
-                    artist: 'Live Monitor',
-                    album: 'SDR Commander'
-                });
-                navigator.mediaSession.setActionHandler('play', () => { 
-                    audioCtx.resume(); 
-                    audioEl.play(); 
-                });
-                navigator.mediaSession.setActionHandler('pause', () => { /* No-op for live */ });
-            }
-
-            // Expose destination for WS to connect to
-            window.audioDest = dest;
         },
 
         upd(m) {
@@ -517,18 +502,10 @@ const htmlContent = `
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
             document.getElementById('bdgAtt').innerText = 'ATT '+m.att.toUpperCase();
-            
-            ['off','weak','mid','strong'].forEach(k => {
-                document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':'');
-            });
-            
+            ['off','weak','mid','strong'].forEach(k => { document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':''); });
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
-
-            // Update Media Session Metadata
-            if ('mediaSession' in navigator) {
-                navigator.mediaSession.metadata.title = \`\${(m.freq/1e6).toFixed(3)} MHz (\${m.mode})\`;
-            }
+            if('mediaSession' in navigator) navigator.mediaSession.metadata.title = \`\${(m.freq/1e6).toFixed(3)} MHz (\${m.mode})\`;
         },
         renderSq(v) {
             this.els.sq.style.left = v + '%'; 
@@ -696,7 +673,6 @@ const htmlContent = `
         del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
         audio(b) {
-            // Audio processing only happens if Context is started
             if(!audioCtx || audioCtx.state === 'suspended') return;
 
             const dv = new DataView(b);
@@ -718,19 +694,13 @@ const htmlContent = `
             const buf = audioCtx.createBuffer(1, f.length, 24000);
             buf.getChannelData(0).set(f);
             
-            // Connect buffer source to the MediaStreamDestination (via window.audioDest)
             const s = audioCtx.createBufferSource(); 
             s.buffer = buf; 
             
-            // Use the destination created in startAudioContext if available, otherwise fallback
-            if (window.audioDest) {
-                s.connect(window.audioDest);
-            } else {
-                s.connect(audioCtx.destination);
-            }
+            if (window.audioDest) s.connect(window.audioDest);
+            else s.connect(audioCtx.destination);
 
             const now = audioCtx.currentTime;
-            // Simple jitter buffer
             let next = (window.nextTime || 0);
             if(next < now) next = now + 0.04;
             s.start(next); 
@@ -738,9 +708,7 @@ const htmlContent = `
         }
     };
 
-    // Auto-init on load
     window.ui.init();
 </script>
 </body>
 </html>
-`;
