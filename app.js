@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Numerical Squelch UI
+ * Modern Web SDR - Improved Bookmark UI
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -51,9 +51,14 @@ function loadData() {
         if (fs.existsSync(CONFIG.squelchFile)) squelchDB = JSON.parse(fs.readFileSync(CONFIG.squelchFile));
     } catch (e) { bookmarks = defaultBookmarks; }
 }
+
 function saveData() {
-    fs.writeFile(CONFIG.bookmarksFile, JSON.stringify(bookmarks, null, 2), () => {});
-    fs.writeFile(CONFIG.squelchFile, JSON.stringify(squelchDB, null, 2), () => {});
+    fs.writeFile(CONFIG.bookmarksFile, JSON.stringify(bookmarks, null, 2), (err) => {
+        if(err) console.error("[System] Bookmark Save Error:", err);
+    });
+    fs.writeFile(CONFIG.squelchFile, JSON.stringify(squelchDB, null, 2), (err) => {
+        if(err) console.error("[System] Squelch Save Error:", err);
+    });
 }
 loadData();
 
@@ -75,11 +80,9 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            // HPF
             let raw = s; s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; this.lastIn = raw; this.lastOut = s;
             sumSq += s * s;
             
-            // AGC
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.6 / (this.agcPeak + 0.05);
             if (g > 15.0) g = 15.0; if (g < 1.0) g = 1.0;
@@ -93,7 +96,6 @@ class AudioDSP {
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.8 + rms * 0.2;
 
-        // Instant Squelch Logic
         const open = Math.max(0.005, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -124,7 +126,6 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // Attenuator Logic
     let gainVal = '48';
     if (att === 'weak') gainVal = '35';
     if (att === 'mid')  gainVal = '10';
@@ -230,9 +231,18 @@ wss.on('connection', ws => {
             else if (c.type === 'start_recording') startRec();
             else if (c.type === 'stop_recording') stopRec();
             else if (c.type === 'delete_recording') { fs.unlinkSync(path.join(CONFIG.recordingsPath, c.filename)); broadcastRecordings(); }
-            else if (c.type === 'add_bookmark') { c.data.id = Date.now().toString(); bookmarks.push(c.data); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
-            else if (c.type === 'delete_bookmark') { bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
-        } catch(e){}
+            else if (c.type === 'add_bookmark') { 
+                c.data.id = Date.now().toString(); 
+                bookmarks.push(c.data); 
+                saveData(); 
+                ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
+            }
+            else if (c.type === 'delete_bookmark') { 
+                bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); 
+                saveData(); 
+                ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
+            }
+        } catch(e){ console.error(e); }
     });
 });
 
@@ -283,6 +293,10 @@ const htmlContent = `
     .btn-tune { background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05)); font-size: 1rem; }
     .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
     @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
+
+    .section-header { display: flex; justify-content: space-between; align-items: center; margin: 24px 4px 8px 4px; }
+    .section-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; color: var(--sub); }
+    .btn-add { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; cursor: pointer; margin-left: 8px; }
 
     .tree { display: flex; flex-direction: column; gap: 2px; }
     .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; transition: background 0.1s; }
@@ -344,7 +358,7 @@ const htmlContent = `
 
         <div class="ctrls">
             <div class="btn-row">
-                <button class="btn btn-tune" style="flex:2" onclick="window.ui.modal(true)"><span class="material-symbols-outlined">dialpad</span> TUNE</button>
+                <button class="btn btn-tune" style="flex:2" onclick="window.ui.modal('tune')"><span class="material-symbols-outlined">dialpad</span> TUNE</button>
                 <button class="btn" id="btnRec" style="flex:1" onclick="window.ws.togRec()"><span class="material-symbols-outlined">fiber_manual_record</span> REC</button>
             </div>
             <div class="btn-row">
@@ -355,14 +369,20 @@ const htmlContent = `
             </div>
         </div>
 
-        <div style="color:var(--sub); font-size:0.8rem; margin:20px 0 5px;">BOOKMARKS</div>
+        <div class="section-header">
+            <span class="section-title">CHANNELS</span>
+            <div>
+                <button class="btn-add" onclick="window.ui.modal('add_folder')">+ FOLDER</button>
+                <button class="btn-add" onclick="window.ui.modal('add_freq')">+ FREQ</button>
+            </div>
+        </div>
         <div class="panel" id="listBM" style="padding:10px;"></div>
 
-        <div style="color:var(--sub); font-size:0.8rem; margin:20px 0 5px;">RECORDINGS</div>
+        <div class="section-header"><span class="section-title">RECORDINGS</span></div>
         <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
-    <div class="ovl" id="modal">
+    <div class="ovl" id="modalTune">
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
             <input type="number" class="inp" id="inpFreq" placeholder="128.800" step="0.001">
@@ -372,8 +392,26 @@ const htmlContent = `
             </div>
             <input type="password" class="inp" id="inpPass" placeholder="Password (required)">
             <div style="display:flex; gap:10px;">
-                <button class="btn" style="flex:1" onclick="window.ui.modal(false)">CANCEL</button>
+                <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
                 <button class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.tune()">TUNE</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="ovl" id="modalAdd">
+        <div class="card">
+            <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;" id="addTitle">Add Channel</div>
+            <input type="text" class="inp" id="addName" placeholder="Name">
+            <div id="addFreqGroup">
+                <input type="number" class="inp" id="addFreq" placeholder="Frequency (MHz)">
+                <div style="display:flex; gap:10px; margin-bottom:15px;">
+                    <button class="btn" id="addModAM" onclick="window.ui.selAddMod('AM')">AM</button>
+                    <button class="btn" id="addModFM" onclick="window.ui.selAddMod('FM')">FM</button>
+                </div>
+            </div>
+            <div style="display:flex; gap:10px;">
+                <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
+                <button class="btn" style="flex:1; background:var(--acc); color:#000;" onclick="window.ws.saveBookmark()">SAVE</button>
             </div>
         </div>
     </div>
@@ -385,6 +423,10 @@ const htmlContent = `
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
         modalMode: 'AM',
+        addMode: 'AM',
+        targetParent: null,
+        addType: 'freq', // 'freq' or 'folder'
+
         init() {
             audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
             if(audioCtx.state==='suspended') audioCtx.resume();
@@ -409,7 +451,7 @@ const htmlContent = `
             this.renderSq(m.squelch);
         },
         renderSq(v) {
-            this.els.sq.style.left = v + '%'; // 0-100 direct mapping
+            this.els.sq.style.left = v + '%'; 
             this.els.valSq.innerText = v;
         },
         adjSq(delta) {
@@ -419,18 +461,44 @@ const htmlContent = `
             this.renderSq(n);
             window.ws.sendSq(n);
         },
-        modal(show) {
-            document.getElementById('modal').style.display = show?'flex':'none';
-            if(show) { 
+        modal(type, parentId=null) {
+            this.closeModal(); // Reset
+            if (type === 'tune') {
+                document.getElementById('modalTune').style.display = 'flex';
                 document.getElementById('inpFreq').value = (state.freq/1e6).toFixed(3); 
                 this.selMod(state.mode); 
                 document.getElementById('inpPass').focus();
+            } else if (type === 'add_folder' || type === 'add_freq') {
+                document.getElementById('modalAdd').style.display = 'flex';
+                this.targetParent = parentId;
+                this.addType = (type === 'add_folder') ? 'folder' : 'freq';
+                
+                document.getElementById('addTitle').innerText = (this.addType === 'folder') ? "Create Folder" : "Add Channel";
+                document.getElementById('addName').value = "";
+                
+                if (this.addType === 'folder') {
+                    document.getElementById('addFreqGroup').style.display = 'none';
+                } else {
+                    document.getElementById('addFreqGroup').style.display = 'block';
+                    document.getElementById('addFreq').value = (state.freq/1e6).toFixed(3);
+                    this.selAddMod(state.mode);
+                }
+                document.getElementById('addName').focus();
             }
+        },
+        closeModal() {
+            document.getElementById('modalTune').style.display = 'none';
+            document.getElementById('modalAdd').style.display = 'none';
         },
         selMod(m) {
             this.modalMode = m;
             document.getElementById('modAM').className = 'btn '+(m==='AM'?'active':'');
             document.getElementById('modFM').className = 'btn '+(m==='FM'?'active':'');
+        },
+        selAddMod(m) {
+            this.addMode = m;
+            document.getElementById('addModAM').className = 'btn '+(m==='AM'?'active':'');
+            document.getElementById('addModFM').className = 'btn '+(m==='FM'?'active':'');
         },
         renderBM(list) {
             const d = list || state.bm;
@@ -451,7 +519,7 @@ const htmlContent = `
                                     <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
                                 </div>
                                 <div class="act">
-                                    <button class="ib" onclick="event.stopPropagation(); window.ws.add('\${n.id}')"><span class="material-symbols-outlined">add</span></button>
+                                    <button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')"><span class="material-symbols-outlined">add</span></button>
                                     <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
                                 </div>
                             </div>
@@ -518,27 +586,35 @@ const htmlContent = `
             if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
             const p = document.getElementById('inpPass').value;
             this.send({type:'auth_tune', password:p, freq:f, mode:m});
-            window.ui.modal(false);
+            window.ui.closeModal();
         },
         tuneDir(f, m) {
             const p = document.getElementById('inpPass').value;
             if (!p) {
                 state.freq = Math.floor(f*1e6);
                 state.mode = m;
-                document.getElementById('inpFreq').value = f.toFixed(3);
-                window.ui.selMod(m);
-                window.ui.modal(true);
+                window.ui.modal('tune');
                 return;
             }
             this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
             state.mode = m;
         },
-        add(pid) {
-            const isF = confirm("Create a Folder? (Cancel for Channel)");
-            const t = prompt(isF?"Folder Name":"Name"); if(!t) return;
-            const d = {title:t, isFolder:isF, parentId:pid};
-            if(!isF) { d.freq = state.freq/1e6; d.mode = state.mode; }
-            this.send({type:'add_bookmark', data:d});
+        saveBookmark() {
+            const title = document.getElementById('addName').value;
+            if (!title) return;
+            
+            const isFolder = (window.ui.addType === 'folder');
+            const data = { title, isFolder, parentId: window.ui.targetParent };
+            
+            if (!isFolder) {
+                const freqVal = parseFloat(document.getElementById('addFreq').value);
+                if (!freqVal) return;
+                data.freq = freqVal;
+                data.mode = window.ui.addMode;
+            }
+            
+            this.send({type:'add_bookmark', data});
+            window.ui.closeModal();
         },
         del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
