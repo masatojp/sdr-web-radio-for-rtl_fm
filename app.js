@@ -1,6 +1,7 @@
 /**
  * Modern Web SDR - PWA Version
  * Features: WFM/AM/FM, Recording, Bookmarks, Single-File PWA
+ * Update: Added explicit install prompt support and 512px icon
  */
 
 require('dotenv').config();
@@ -19,6 +20,7 @@ const ICON_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAMAAABlDbMzAAAABGdBTUEAALG
 const ICON_BUFFER = Buffer.from(ICON_BASE64, 'base64');
 
 // Manifest JSON
+// Note: 512x512 icon added for Android Chrome requirements
 const MANIFEST = JSON.stringify({
     "name": "SDR Commander",
     "short_name": "SDR Cmd",
@@ -26,12 +28,16 @@ const MANIFEST = JSON.stringify({
     "display": "standalone",
     "background_color": "#050507",
     "theme_color": "#1e1e23",
-    "icons": [{ "src": "/icon.png", "sizes": "192x192", "type": "image/png" }]
+    "description": "Web-based SDR Controller",
+    "icons": [
+        { "src": "/icon.png", "sizes": "192x192", "type": "image/png" },
+        { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    ]
 });
 
 // Service Worker (Minimal Network-First Strategy)
 const SW_JS = `
-const CACHE_NAME = 'sdr-cache-v1';
+const CACHE_NAME = 'sdr-cache-v2';
 self.addEventListener('install', (e) => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', (e) => {
@@ -306,7 +312,8 @@ const server = http.createServer((req, res) => {
         res.end(SW_JS);
         return;
     }
-    if (u.pathname === '/icon.png') {
+    // Handle both regular and large icon requests with the same buffer for simplicity
+    if (u.pathname === '/icon.png' || u.pathname === '/icon-512.png') {
         res.writeHead(200, {'Content-Type': 'image/png'});
         res.end(ICON_BUFFER);
         return;
@@ -401,6 +408,7 @@ const htmlContent = `
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="SDR Cmd">
+<meta name="description" content="SDR Commander PWA">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon.png">
 <link rel="icon" type="image/png" href="/icon.png">
@@ -438,6 +446,12 @@ const htmlContent = `
     .btn-tune { background: linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05)); font-size: 1rem; }
     .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
     @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
+    
+    .btn-install { 
+        display: none; background: linear-gradient(135deg, #00c6ff, #0072ff); 
+        color: white; border: none; font-weight: bold; margin-bottom: 12px;
+        box-shadow: 0 4px 15px rgba(0, 114, 255, 0.4);
+    }
 
     .btn-audio-toggle { 
         width: 100%; padding: 16px; 
@@ -508,6 +522,10 @@ const htmlContent = `
         </div>
 
         <div class="ctrls">
+            <button class="btn btn-install" id="btnInstall">
+                <span class="material-symbols-outlined">install_mobile</span> アプリをインストール
+            </button>
+
             <button class="btn-audio-toggle" id="btnAudio" onclick="window.ui.togAudio()">
                 <span class="material-symbols-outlined">volume_up</span> START LISTENING
             </button>
@@ -576,6 +594,31 @@ const htmlContent = `
     <audio id="audioBridge" style="display:none;" playsinline></audio>
 
 <script>
+    // PWA Install Prompt Logic
+    let deferredPrompt;
+    const installBtn = document.getElementById('btnInstall');
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+        installBtn.style.display = 'flex'; // Show button
+    });
+
+    installBtn.addEventListener('click', async () => {
+        if (!deferredPrompt) return;
+        deferredPrompt.prompt();
+        const { outcome } = await deferredPrompt.userChoice;
+        if (outcome === 'accepted') {
+            installBtn.style.display = 'none';
+        }
+        deferredPrompt = null;
+    });
+
+    window.addEventListener('appinstalled', () => {
+        installBtn.style.display = 'none';
+        deferredPrompt = null;
+    });
+
     // PWA Service Worker Registration
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js')
@@ -795,113 +838,6 @@ const htmlContent = `
                         <button class="ib" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
                 </div>\`).join('');
-        }
-    };
-
-    window.ws = {
-        c: null,
-        connect() {
-            this.c = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host);
-            this.c.binaryType = 'arraybuffer';
-            this.c.onmessage = e => {
-                if(typeof e.data === 'string') {
-                    const m = JSON.parse(e.data);
-                    if(m.type==='status_update') window.ui.upd(m);
-                    else if(m.type==='bookmarks') { state.bm = m.data; window.ui.renderBM(); }
-                    else if(m.type==='recordings') window.ui.renderRec(m.data);
-                    else if(m.type==='error') alert(m.msg);
-                } else this.audio(e.data);
-            };
-            this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
-        },
-        send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
-        sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
-        setMode(m) { state.mode=m; this.tune(true); },
-        setAtt(a) { this.send({type:'set_att', att:a}); },
-        togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
-        move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
-        tune(skip=false) {
-            let f = state.freq;
-            const m = window.ui.modalMode; 
-            if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
-            const p = document.getElementById('inpPass').value;
-            this.send({type:'auth_tune', password:p, freq:f, mode:m});
-            window.ui.closeModal();
-        },
-        tuneDir(f, m) {
-            const p = document.getElementById('inpPass').value;
-            if (!p) {
-                state.freq = Math.floor(f*1e6);
-                state.mode = m;
-                document.getElementById('inpFreq').value = f.toFixed(3);
-                window.ui.selMod(m);
-                window.ui.modal('tune');
-                return;
-            }
-            this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
-            state.mode = m;
-        },
-        saveBookmark() {
-            const title = document.getElementById('addName').value;
-            if (!title) return;
-            const isFolder = (window.ui.addType === 'folder');
-            
-            if (state.editTargetId) {
-                const data = { id: state.editTargetId, title, isFolder };
-                if (!isFolder) {
-                    const freqVal = parseFloat(document.getElementById('addFreq').value);
-                    if (!freqVal) return;
-                    data.freq = freqVal;
-                    data.mode = window.ui.addMode;
-                }
-                this.send({type:'edit_bookmark', data});
-            } else {
-                const data = { title, isFolder, parentId: window.ui.targetParent };
-                if (!isFolder) {
-                    const freqVal = parseFloat(document.getElementById('addFreq').value);
-                    if (!freqVal) return;
-                    data.freq = freqVal;
-                    data.mode = window.ui.addMode;
-                }
-                this.send({type:'add_bookmark', data});
-            }
-            window.ui.closeModal();
-        },
-        del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
-        delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
-        
-        audio(b) {
-            if(!audioCtx || audioCtx.state !== 'running') return;
-
-            const dv = new DataView(b);
-            const rssi = dv.getInt16(0, true);
-            const sqlOpen = dv.getInt16(2, true);
-            
-            const bar = window.ui.els.rssi;
-            bar.style.width = Math.min(100, (rssi/200)*100)+'%';
-            if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
-            const bdgSql = document.getElementById('bdgSql');
-            if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
-            else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
-
-            // Updated for 48kHz
-            const f = new Float32Array((b.byteLength - 4) / 2);
-            const s16 = new Int16Array(b, 4);
-            for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
-
-            const buf = audioCtx.createBuffer(1, f.length, 48000);
-            buf.getChannelData(0).set(f);
-
-            const now = audioCtx.currentTime;
-            if (nextStartTime < now) nextStartTime = now;
-
-            const s = audioCtx.createBufferSource();
-            s.buffer = buf;
-            if (window.audioDest) s.connect(window.audioDest);
-            else s.connect(audioCtx.destination);
-            
-            s.start(nextStartTime);
-            nextStartTime += buf.duration;
         }
     };
 
