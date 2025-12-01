@@ -1,6 +1,6 @@
 /**
  * Modern Web SDR - Manual Audio Control Version
- * Features: WFM Support, Bookmark Editing, Reordering
+ * Features: WFM Support (High Quality), Bookmark Editing, Reordering
  * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
  */
 
@@ -22,7 +22,8 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    sampleRate: 24000, 
+    // 【改善】ピー音対策：48kHzに上げることで19kHzのパイロット信号の折り返しノイズを防ぐ
+    sampleRate: 48000, 
     ppm: 0,
     
     // パス設定
@@ -187,7 +188,9 @@ function startRadio(freq, mode, att) {
     let args = ['-f', freq.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
 
     if (mode === 'WFM') {
-        args.push('-M', 'wbfm', '-s', '170000', '-r', CONFIG.sampleRate.toString());
+        // 【改善】240k入力 -> 48k出力 (5倍ダウンサンプリング)
+        // 整数倍での変換により計算誤差ノイズを低減し、帯域も確保
+        args.push('-M', 'wbfm', '-s', '240000', '-r', CONFIG.sampleRate.toString());
     } else {
         let rtlMode = (mode === 'FM') ? 'fm' : 'am';
         args.push('-M', rtlMode, '-s', CONFIG.sampleRate.toString());
@@ -317,22 +320,16 @@ wss.on('connection', ws => {
                 const { id, dir } = c;
                 const item = bookmarks.find(b => b.id === id);
                 if (item) {
-                    // 同じ階層（同じ親）の兄弟要素を取得
                     const siblings = bookmarks.filter(b => b.parentId === item.parentId);
                     const index = siblings.findIndex(b => b.id === id);
-                    
-                    // 移動先の兄弟要素を特定
                     let swapTarget = null;
                     if (dir === 'up' && index > 0) swapTarget = siblings[index - 1];
                     else if (dir === 'down' && index < siblings.length - 1) swapTarget = siblings[index + 1];
                     
                     if (swapTarget) {
-                        // グローバル配列内でのインデックスを取得してスワップ
                         const globalIndex = bookmarks.findIndex(b => b.id === id);
                         const globalTargetIndex = bookmarks.findIndex(b => b.id === swapTarget.id);
-                        
                         [bookmarks[globalIndex], bookmarks[globalTargetIndex]] = [bookmarks[globalTargetIndex], bookmarks[globalIndex]];
-                        
                         saveData();
                         ws.send(JSON.stringify({type:'bookmarks', data:bookmarks}));
                     }
@@ -827,11 +824,12 @@ const htmlContent = `
             if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
             else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
 
+            // Updated for 48kHz
             const f = new Float32Array((b.byteLength - 4) / 2);
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
 
-            const buf = audioCtx.createBuffer(1, f.length, 24000);
+            const buf = audioCtx.createBuffer(1, f.length, 48000);
             buf.getChannelData(0).set(f);
 
             const now = audioCtx.currentTime;
