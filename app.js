@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Android Fix Version
+ * Modern Web SDR - Android/iOS Universal Fix
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -448,7 +448,7 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" style="display:none;" playsinline></audio>
+    <audio id="audioBridge" style="display:none;" playsinline autoplay></audio>
 
 <script>
     let audioCtx, wsConn;
@@ -461,25 +461,25 @@ const htmlContent = `
         targetParent: null,
         addType: 'freq',
 
-        // --- ANDROID/IOS AUDIO UNLOCKER ---
+        // --- ANDROID FIX VERSION ---
         init() {
-            // Android Chrome requires specific interactions to unlock AudioContext
-            // We bind this to everything to ensure it wakes up on first touch
+            // Android Chrome Strict Autoplay Policy Unlocker
             const unlock = () => {
+                // 1. Initialize AudioContext WITHOUT forced sampleRate. 
+                // Android prefers native hardware rate (48000/44100).
                 if(!audioCtx) {
-                    // [Android Fix] Do not force sampleRate here. Let OS decide (usually 48000).
                     const Ctx = window.AudioContext || window.webkitAudioContext;
-                    audioCtx = new Ctx();
+                    audioCtx = new Ctx(); 
                     
-                    // Audio Bridge for background playback capability
+                    // 2. Setup Background Audio Bridge
                     const dest = audioCtx.createMediaStreamDestination();
                     const audioEl = document.getElementById('audioBridge');
                     audioEl.srcObject = dest.stream;
-                    // Try playing. On Android this needs to be inside the event.
+                    // Force play inside the event handler
                     audioEl.play().catch(e => console.log("Bg audio init pending..."));
                     window.audioDest = dest;
 
-                    // Keep-alive silent oscillator
+                    // 3. Keep-alive oscillator (Silent)
                     const osc = audioCtx.createOscillator();
                     const g = audioCtx.createGain();
                     osc.connect(g); g.connect(dest);
@@ -490,11 +490,19 @@ const htmlContent = `
                         navigator.mediaSession.setActionHandler('play', ()=>{ audioCtx.resume(); audioEl.play(); });
                     }
                 }
-                if(audioCtx.state === 'suspended') audioCtx.resume();
+                
+                // 4. Aggressive Resume for Android
+                if(audioCtx.state === 'suspended') {
+                    audioCtx.resume().then(() => {
+                        console.log("Audio Context Resumed!");
+                    });
+                }
             };
             
-            // Listen to any touch/click/key to unlock audio immediately
-            ['click','touchstart','keydown','scroll'].forEach(e => document.body.addEventListener(e, unlock, {once:true}));
+            // Bind to ALL interaction types to catch the first user gesture
+            ['click','touchstart','touchend','keydown'].forEach(e => {
+                document.body.addEventListener(e, unlock, {once:false, capture:true});
+            });
 
             // Connect WS immediately
             window.ws.connect();
@@ -677,7 +685,9 @@ const htmlContent = `
         del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
         audio(b) {
-            if(!audioCtx || audioCtx.state === 'suspended') return;
+            if(!audioCtx) return; 
+            // Aggressive resume attempt on incoming audio
+            if(audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
 
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
@@ -695,8 +705,8 @@ const htmlContent = `
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
             
-            // [Android Fix] Tell the browser the SOURCE is 24000. 
-            // The output hardware (48000/44100) will resample automatically.
+            // Tell the browser: "This buffer is 24000Hz". 
+            // The browser will resample it to the hardware rate (48000Hz) automatically.
             const buf = audioCtx.createBuffer(1, f.length, 24000);
             buf.getChannelData(0).set(f);
             
@@ -709,9 +719,11 @@ const htmlContent = `
             const now = audioCtx.currentTime;
             let next = (window.nextTime || 0);
             
-            // [Android Fix] Prevent drift if playback falls behind
-            if(next < now) next = now + 0.04;
-            if(next > now + 0.5) next = now + 0.1; // Reset if too far ahead (lag fix)
+            // [Android Timing Fix]
+            // If the next schedule is in the past (lag), reset it to now.
+            if(next < now) next = now;
+            // Add a small safety buffer for jittery Android timers
+            next += 0.02; 
 
             s.start(next); 
             window.nextTime = next + buf.duration;
