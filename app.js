@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Manual Audio Control Version with WFM Fix
+ * Modern Web SDR - Manual Audio Control Version with WFM Fix & Bookmark Editing
  * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
  */
 
@@ -21,7 +21,7 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    sampleRate: 24000, // 最終的な出力レート（ブラウザ再生用）
+    sampleRate: 24000, 
     ppm: 0,
     
     // パス設定
@@ -120,7 +120,7 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            // HPF (Bass cut is minimal: 0.95 pole is roughly 200Hz at 24k? Actually it's simple DC block)
+            // HPF
             let raw = s; 
             s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; 
             this.lastIn = raw; 
@@ -183,17 +183,11 @@ function startRadio(freq, mode, att) {
     if (att === 'mid')  gainVal = '9';
     if (att === 'strong') gainVal = '0';
 
-    // 基本引数
     let args = ['-f', freq.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
 
     if (mode === 'WFM') {
-        // 【修正点】WFMの場合
-        // -s 170000 : 広帯域FMに必要な帯域幅を確保するために高い入力レートを指定
-        // -r 24000  : 出力はWebアプリに合わせて24kHzにダウンサンプリング
         args.push('-M', 'wbfm', '-s', '170000', '-r', CONFIG.sampleRate.toString());
     } else {
-        // AM/NFMの場合
-        // 入力レート＝出力レート＝24000 でOK
         let rtlMode = (mode === 'FM') ? 'fm' : 'am';
         args.push('-M', rtlMode, '-s', CONFIG.sampleRate.toString());
     }
@@ -306,6 +300,18 @@ wss.on('connection', ws => {
             else if (c.type === 'stop_recording') stopRec();
             else if (c.type === 'delete_recording') { fs.unlinkSync(path.join(CONFIG.recordingsPath, c.filename)); broadcastRecordings(); }
             else if (c.type === 'add_bookmark') { c.data.id = Date.now().toString(); bookmarks.push(c.data); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
+            else if (c.type === 'edit_bookmark') { 
+                const idx = bookmarks.findIndex(b => b.id === c.data.id);
+                if (idx !== -1) {
+                    bookmarks[idx].title = c.data.title;
+                    if (!bookmarks[idx].isFolder) {
+                         bookmarks[idx].freq = c.data.freq;
+                         bookmarks[idx].mode = c.data.mode;
+                    }
+                    saveData();
+                    ws.send(JSON.stringify({type:'bookmarks', data:bookmarks}));
+                }
+            }
             else if (c.type === 'delete_bookmark') { bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
         } catch(e){}
     });
@@ -497,7 +503,7 @@ const htmlContent = `
 
 <script>
     let audioCtx;
-    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10 };
+    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null };
     let nextStartTime = 0; 
 
     window.ui = {
@@ -565,7 +571,6 @@ const htmlContent = `
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
             
-            // MediaSession fix
             if('mediaSession' in navigator) {
                 navigator.mediaSession.metadata.title = (m.freq/1e6).toFixed(3) + ' MHz (' + m.mode + ')';
             }
@@ -581,7 +586,7 @@ const htmlContent = `
             this.renderSq(n);
             window.ws.sendSq(n);
         },
-        modal(type, parentId=null) {
+        modal(type, id=null) {
             this.closeModal(); 
             if (type === 'tune') {
                 document.getElementById('modalTune').style.display = 'flex';
@@ -590,7 +595,8 @@ const htmlContent = `
                 document.getElementById('inpPass').focus();
             } else if (type === 'add_folder' || type === 'add_freq') {
                 document.getElementById('modalAdd').style.display = 'flex';
-                this.targetParent = parentId;
+                this.targetParent = id; 
+                state.editTargetId = null; 
                 this.addType = (type === 'add_folder') ? 'folder' : 'freq';
                 document.getElementById('addTitle').innerText = (this.addType === 'folder') ? "Create Folder" : "Add Channel";
                 document.getElementById('addName').value = "";
@@ -602,6 +608,24 @@ const htmlContent = `
                     this.selAddMod(state.mode);
                 }
                 document.getElementById('addName').focus();
+            } else if (type === 'edit') {
+                // Edit Mode
+                const target = state.bm.find(b => b.id === id);
+                if (!target) return;
+                
+                state.editTargetId = id;
+                document.getElementById('modalAdd').style.display = 'flex';
+                this.addType = target.isFolder ? 'folder' : 'freq';
+                document.getElementById('addTitle').innerText = target.isFolder ? "Edit Folder" : "Edit Channel";
+                
+                document.getElementById('addName').value = target.title;
+                if (target.isFolder) {
+                     document.getElementById('addFreqGroup').style.display = 'none';
+                } else {
+                     document.getElementById('addFreqGroup').style.display = 'block';
+                     document.getElementById('addFreq').value = target.freq;
+                     this.selAddMod(target.mode);
+                }
             }
         },
         closeModal() {
@@ -640,6 +664,7 @@ const htmlContent = `
                                 </div>
                                 <div class="act">
                                     <button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')"><span class="material-symbols-outlined">add</span></button>
+                                    <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
                                     <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
                                 </div>
                             </div>
@@ -654,6 +679,7 @@ const htmlContent = `
                                 <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
                             </div>
                         </div>
+                        <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
                         <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>\`;
             }).join('');
@@ -725,14 +751,28 @@ const htmlContent = `
             const title = document.getElementById('addName').value;
             if (!title) return;
             const isFolder = (window.ui.addType === 'folder');
-            const data = { title, isFolder, parentId: window.ui.targetParent };
-            if (!isFolder) {
-                const freqVal = parseFloat(document.getElementById('addFreq').value);
-                if (!freqVal) return;
-                data.freq = freqVal;
-                data.mode = window.ui.addMode;
+            
+            // Edit Mode Check
+            if (state.editTargetId) {
+                const data = { id: state.editTargetId, title, isFolder };
+                if (!isFolder) {
+                    const freqVal = parseFloat(document.getElementById('addFreq').value);
+                    if (!freqVal) return;
+                    data.freq = freqVal;
+                    data.mode = window.ui.addMode;
+                }
+                this.send({type:'edit_bookmark', data});
+            } else {
+                // Add Mode
+                const data = { title, isFolder, parentId: window.ui.targetParent };
+                if (!isFolder) {
+                    const freqVal = parseFloat(document.getElementById('addFreq').value);
+                    if (!freqVal) return;
+                    data.freq = freqVal;
+                    data.mode = window.ui.addMode;
+                }
+                this.send({type:'add_bookmark', data});
             }
-            this.send({type:'add_bookmark', data});
             window.ui.closeModal();
         },
         del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
