@@ -1,11 +1,14 @@
 /**
- * Modern Web SDR - Stable PWA Edition
- * Fix: iOS Safari AudioContext compatibility & Error Handling
+ * Modern Web SDR - Single File PWA Edition
+ * Features:
+ * - Single file deployment (Embedded HTML, CSS, JS, Manifest, SW, Icon)
+ * - PWA Support (Installable on Android/iOS)
+ * - Reliable Background Audio (Media Session API + Oscillator Hack)
+ * - RTL-SDR Control (WFM/AM/FM)
  */
 
 require('dotenv').config();
 const http = require('http');
-const https = require('https');
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
@@ -33,67 +36,59 @@ const CONFIG = {
 if (!fs.existsSync(CONFIG.recordingsPath)) fs.mkdirSync(CONFIG.recordingsPath);
 
 // ==========================================
-// Discord Notification
+// Embedded Assets (Single File Magic)
 // ==========================================
-function sendDiscordNotification() {
-    const rawUrl = process.env.DISCORD_WEBHOOK_URL || "";
-    const webhookUrl = rawUrl.trim();
-    if (!webhookUrl || !webhookUrl.startsWith("https://")) return;
 
-    const payload = JSON.stringify({
-        username: "SDR Commander",
-        embeds: [{
-            title: "📡 System Started",
-            description: "SDR Web Receiver is online.",
-            color: 5814783,
-            fields: [
-                { name: "Initial Freq", value: `${(CONFIG.initialFreq/1e6).toFixed(3)} MHz`, inline: true },
-                { name: "Mode", value: CONFIG.initialMode, inline: true }
-            ],
-            timestamp: new Date().toISOString()
-        }]
-    });
+// 簡易アイコン (Base64 PNG: 緑色の円に波形のようなデザイン)
+const APP_ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAMAAABlDb5CAAAAkFBMVEUAAAAAAAD///8zMzP/MzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMAAAAzMzP///8zMzMav72PAAAAL3RSTlMA9Qj9+BMEB/sQ/v0I+wT8/f78/v0I/PsTBAf9CP31/v38/PwE+wj9/f7+/v39/fsIT1qVngAAAnZJREFUeNrt3cFy2jAQBdBFEmD8J2yTwUkK+f9/64wtE9oZ2EGaK3vO3AmT7WukkS0FAAAAAAAAAAAAAAAAAAAAAAAA4C/beT0cx/F63s57+3K4X9rXw3E87+f1tN/v7R+e1/vb+3m/H8fxut/a18Px/ni4X9rXw3G8P97v7R+e1/vb++PhfmkfAAAAAAAAAAAAAAAAAAAAAAAAAAAAgH8x0/PZzGbf22/N7Hw20/PZzM5nMz2fzax9a2bnMx89AAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/LTM9nM5t9b781s/PZTM9nMzufzfR8NrP2rZmdz3z0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAPwvMz2fzWz2vf3WzM5nMz2fzex8NtPz2czat2Z2PvPRAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/y0zPZzObfW+/NbPz2UzPZzM7n830fDaz9q2Znc989AAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8LzM9n81s9r391szOZzM9n83sfDbT89nM2rdmdj7z0QMAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/8tMz2czm31vvzWz89lMz2czO5/N9Hw2s/atfwQAAAAAAAAAAAAAAAAAAAAAAAAAAAD4v877o/2j/dF+aV8Px/G8n9fTfr+3f3he72/v5/1+HMfrfmtfD8f74+F+aV8Px/H+eL+3f3he72/vj4f7pX0AAAAAAAD4c9s5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD+10zPZzObfW+/NbPz2UzPZzM7n830fDaz9q2Znc989AAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8LzM9n81s9r391szOZzM9n83sfDbT89nM2rdmdj7z0QMAAAAAAAAAAAAAAAAAAAAAAADwP/0CWHdpw7C+yOsAAAAASUVORK5CYII=";
+const APP_ICON_BUF = Buffer.from(APP_ICON_B64, 'base64');
 
-    try {
-        const urlObj = new URL(webhookUrl);
-        const req = https.request({
-            hostname: urlObj.hostname,
-            path: urlObj.pathname + urlObj.search,
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
-        }, () => {});
-        req.on('error', () => {});
-        req.write(payload);
-        req.end();
-    } catch (e) {}
-}
+// PWA Manifest
+const MANIFEST_JSON = JSON.stringify({
+    name: "SDR COMMANDER",
+    short_name: "SDR",
+    start_url: "/",
+    display: "standalone",
+    background_color: "#050507",
+    theme_color: "#050507",
+    icons: [
+        { src: "/icon.png", sizes: "192x192", type: "image/png" },
+        { src: "/icon.png", sizes: "512x512", type: "image/png" }
+    ]
+});
 
-// ==========================================
-// データ管理
-// ==========================================
-let bookmarks = [];
-let squelchDB = {};
-
-const defaultBookmarks = [
-  { "title": "Sendai Airport", "isFolder": true, "parentId": null, "id": "1763731824815" },
-  { "title": "SDJ ATIS", "freq": 126.45, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731847585" },
-  { "title": "SDJ TWR", "freq": 118.7, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731881249" },
-  { "title": "Sendai FM Radio", "isFolder": true, "parentId": null, "id": "1763731929504" },
-  { "title": "Date FM", "freq": 77.1, "mode": "WFM", "isFolder": false, "parentId": "1763731929504", "id": "1763732002721" }
+// Service Worker (JavaScript String)
+const SW_JS = `
+const CACHE_NAME = 'sdr-core-v2';
+const ASSETS = [
+    '/',
+    '/icon.png',
+    'https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap',
+    'https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0'
 ];
 
-function loadData() {
-    try {
-        if (fs.existsSync(CONFIG.bookmarksFile)) bookmarks = JSON.parse(fs.readFileSync(CONFIG.bookmarksFile));
-        else { bookmarks = defaultBookmarks; saveData(); }
-        if (fs.existsSync(CONFIG.squelchFile)) squelchDB = JSON.parse(fs.readFileSync(CONFIG.squelchFile));
-    } catch (e) { bookmarks = defaultBookmarks; }
-}
-function saveData() {
-    fs.writeFile(CONFIG.bookmarksFile, JSON.stringify(bookmarks, null, 2), () => {});
-    fs.writeFile(CONFIG.squelchFile, JSON.stringify(squelchDB, null, 2), () => {});
-}
-loadData();
+self.addEventListener('install', (e) => {
+    e.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (e) => {
+    e.waitUntil(caches.keys().then(keys => Promise.all(keys.map(key => {
+        if (key !== CACHE_NAME) return caches.delete(key);
+    }))));
+    self.clients.claim();
+});
+
+self.addEventListener('fetch', (e) => {
+    // API, WebSocket, Downloads are Network Only
+    if (e.request.url.includes('/download/') || e.request.url.includes('manifest.json') || e.request.url.startsWith('ws')) {
+        return;
+    }
+    e.respondWith(
+        caches.match(e.request).then((res) => res || fetch(e.request))
+    );
+});
+`;
 
 // ==========================================
 // DSP (Audio Processing)
@@ -163,6 +158,32 @@ class AudioDSP {
 const dsp = new AudioDSP();
 
 // ==========================================
+// データ管理
+// ==========================================
+let bookmarks = [];
+let squelchDB = {};
+const defaultBookmarks = [
+  { "title": "Sendai Airport", "isFolder": true, "parentId": null, "id": "1763731824815" },
+  { "title": "SDJ ATIS", "freq": 126.45, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731847585" },
+  { "title": "SDJ TWR", "freq": 118.7, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731881249" },
+  { "title": "FM Radio", "isFolder": true, "parentId": null, "id": "1763731929504" },
+  { "title": "Date FM", "freq": 77.1, "mode": "WFM", "isFolder": false, "parentId": "1763731929504", "id": "1763732002721" }
+];
+
+function loadData() {
+    try {
+        if (fs.existsSync(CONFIG.bookmarksFile)) bookmarks = JSON.parse(fs.readFileSync(CONFIG.bookmarksFile));
+        else { bookmarks = defaultBookmarks; saveData(); }
+        if (fs.existsSync(CONFIG.squelchFile)) squelchDB = JSON.parse(fs.readFileSync(CONFIG.squelchFile));
+    } catch (e) { bookmarks = defaultBookmarks; }
+}
+function saveData() {
+    fs.writeFile(CONFIG.bookmarksFile, JSON.stringify(bookmarks, null, 2), () => {});
+    fs.writeFile(CONFIG.squelchFile, JSON.stringify(squelchDB, null, 2), () => {});
+}
+loadData();
+
+// ==========================================
 // RTL-SDR Backend
 // ==========================================
 let rtlProcess = null;
@@ -186,13 +207,14 @@ function startRadio(freq, mode, att) {
     let args = ['-f', freq.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
 
     if (mode === 'WFM') {
+        // 48kHz output
         args.push('-M', 'wbfm', '-s', '240000', '-r', CONFIG.sampleRate.toString());
     } else {
         let rtlMode = (mode === 'FM') ? 'fm' : 'am';
         args.push('-M', rtlMode, '-s', CONFIG.sampleRate.toString());
     }
 
-    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
+    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}`);
     
     rtlProcess = spawn('rtl_fm', args);
     let chunkBuf = Buffer.alloc(0);
@@ -211,11 +233,10 @@ function startRadio(freq, mode, att) {
 
 function handleAudio(raw) {
     const res = dsp.process(raw, { squelchThreshold });
-    const head = new Int16Array(1); head[0] = res.rssi;
-    const statusWord = res.isOpen ? 1 : 0; 
+    // Combine RSSI, Squelch Status, and Audio Data
     const combo = Buffer.alloc(raw.length + 4); 
     combo.writeInt16LE(res.rssi, 0);
-    combo.writeInt16LE(statusWord, 2);
+    combo.writeInt16LE(res.isOpen ? 1 : 0, 2);
     res.buffer.copy(combo, 4);
 
     wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(combo); });
@@ -263,51 +284,44 @@ function writeWavHeader(s, r, l) {
 }
 
 // ==========================================
-// Server & PWA Assets
+// Web Server (Serving virtual PWA files)
 // ==========================================
-const manifestJSON = JSON.stringify({
-    "name": "SDR Commander",
-    "short_name": "SDR",
-    "start_url": "/",
-    "display": "standalone",
-    "background_color": "#050507",
-    "theme_color": "#00ffc8",
-    "icons": [{ "src": "/icon.svg", "sizes": "512x512", "type": "image/svg+xml" }]
-});
-
-const swJS = `
-self.addEventListener('install', (e) => { e.waitUntil(self.skipWaiting()); });
-self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
-self.addEventListener('fetch', (e) => {
-    const url = new URL(e.request.url);
-    if (url.pathname === '/' || url.pathname.endsWith('.js') || url.pathname.endsWith('.json') || url.pathname.endsWith('.svg')) {
-        e.respondWith(fetch(e.request));
-    }
-});
-`;
-
-const iconSVG = `
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-    <rect width="512" height="512" fill="#050507"/>
-    <circle cx="256" cy="256" r="200" stroke="#00ffc8" stroke-width="20" fill="none"/>
-    <path d="M256 100 L256 256 L350 350" stroke="#00ffc8" stroke-width="30" stroke-linecap="round"/>
-    <circle cx="256" cy="256" r="30" fill="#00ffc8"/>
-    <text x="50%" y="85%" text-anchor="middle" fill="#fff" font-family="sans-serif" font-weight="bold" font-size="60">SDR</text>
-</svg>
-`;
-
 const server = http.createServer((req, res) => {
     const u = new URL(req.url, `http://${req.headers.host}`);
-    if (u.pathname === '/') { res.writeHead(200,{'Content-Type':'text/html'}); res.end(htmlContent); }
-    else if (u.pathname === '/manifest.json') { res.writeHead(200,{'Content-Type':'application/json'}); res.end(manifestJSON); }
-    else if (u.pathname === '/sw.js') { res.writeHead(200,{'Content-Type':'application/javascript'}); res.end(swJS); }
-    else if (u.pathname === '/icon.svg') { res.writeHead(200,{'Content-Type':'image/svg+xml'}); res.end(iconSVG); }
-    else if (u.pathname.startsWith('/download/')) {
+    
+    // 1. Main Page
+    if (u.pathname === '/') { 
+        res.writeHead(200,{'Content-Type':'text/html'}); 
+        res.end(htmlContent); 
+    
+    // 2. PWA Manifest
+    } else if (u.pathname === '/manifest.json') {
+        res.writeHead(200, {'Content-Type': 'application/json'});
+        res.end(MANIFEST_JSON);
+
+    // 3. Service Worker
+    } else if (u.pathname === '/sw.js') {
+        res.writeHead(200, {'Content-Type': 'text/javascript'});
+        res.end(SW_JS);
+
+    // 4. App Icon
+    } else if (u.pathname === '/icon.png') {
+        res.writeHead(200, {'Content-Type': 'image/png'});
+        res.end(APP_ICON_BUF);
+
+    // 5. Downloads
+    } else if (u.pathname.startsWith('/download/')) {
         const f = path.basename(decodeURIComponent(u.pathname));
         const fp = path.join(CONFIG.recordingsPath, f);
-        if (fs.existsSync(fp)) { res.writeHead(200,{'Content-Type':'audio/wav','Content-Disposition':`attachment; filename="${f}"`}); fs.createReadStream(fp).pipe(res); }
-        else { res.writeHead(404); res.end(); }
-    } else { res.writeHead(404); res.end(); }
+        if (fs.existsSync(fp)) { 
+            res.writeHead(200,{'Content-Type':'audio/wav','Content-Disposition':`attachment; filename="${f}"`}); 
+            fs.createReadStream(fp).pipe(res); 
+        } else { 
+            res.writeHead(404); res.end(); 
+        }
+    } else { 
+        res.writeHead(404); res.end(); 
+    }
 });
 const wss = new WebSocket.Server({ server });
 
@@ -372,12 +386,12 @@ wss.on('connection', ws => {
 
 server.listen(CONFIG.webPort, () => {
     console.log(`[System] Interface Ready: http://localhost:${CONFIG.webPort}`);
+    console.log(`[PWA] Manifest and SW are active. Add to Home Screen for best experience.`);
     startRadio(CONFIG.initialFreq, CONFIG.initialMode, 'off');
-    sendDiscordNotification();
 });
 
 // ==========================================
-// Frontend
+// Frontend HTML/JS/CSS (Embedded)
 // ==========================================
 const htmlContent = `
 <!DOCTYPE html>
@@ -388,15 +402,14 @@ const htmlContent = `
 <meta name="theme-color" content="#050507">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="manifest" href="/manifest.json">
-<link rel="icon" type="image/svg+xml" href="/icon.svg">
-<link rel="apple-touch-icon" href="/icon.svg">
 <title>SDR COMMANDER</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon.png">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
 <style>
     :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; }
-    body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+    body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
     .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
     .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
     
@@ -560,14 +573,20 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" style="display:none;" playsinline></audio>
+    <!-- Audio Bridge for iOS/Android Background Playback -->
+    <audio id="audioBridge" style="display:none;" playsinline loop></audio>
 
 <script>
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
-
     let audioCtx;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null };
     let nextStartTime = 0; 
+
+    // Register Service Worker
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js').catch(e => console.log('SW setup failed', e));
+        });
+    }
 
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
@@ -578,65 +597,72 @@ const htmlContent = `
 
         init() {
             window.ws.connect();
-            // Media Session Handling
-            if('mediaSession' in navigator) {
-                navigator.mediaSession.setActionHandler('play', () => this.togAudio());
-                navigator.mediaSession.setActionHandler('pause', () => this.togAudio());
-                navigator.mediaSession.setActionHandler('stop', () => this.togAudio());
+            this.updateMediaSession();
+        },
+
+        togAudio() {
+            const btn = document.getElementById('btnAudio');
+            
+            if (!audioCtx) {
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                audioCtx = new Ctx(); 
+                
+                // --- Background Audio Hack ---
+                // Connect a silent oscillator to a media stream destination,
+                // then play that stream in a standard HTML5 audio tag.
+                // This tricks iOS/Android into thinking a "real" song is playing.
+                const dest = audioCtx.createMediaStreamDestination();
+                const audioEl = document.getElementById('audioBridge');
+                audioEl.srcObject = dest.stream;
+                
+                const osc = audioCtx.createOscillator();
+                const g = audioCtx.createGain();
+                osc.connect(g); g.connect(dest);
+                osc.frequency.value = 10; g.gain.value = 0.001; 
+                osc.start();
+                
+                window.audioDest = dest;
+
+                audioEl.play().then(() => {
+                    this.updateBtnState('running');
+                    this.updateMediaSession();
+                }).catch(e => console.error(e));
+                
+                return;
+            }
+
+            if (audioCtx.state === 'running') {
+                audioCtx.suspend().then(() => {
+                    this.updateBtnState('suspended');
+                    document.getElementById('audioBridge').pause();
+                    this.updateMediaSession();
+                });
+            } else {
+                audioCtx.resume().then(() => {
+                    document.getElementById('audioBridge').play();
+                    this.updateBtnState('running');
+                    this.updateMediaSession();
+                });
             }
         },
 
-        // Manual Audio Toggle Control with Background Optimization
-        togAudio() {
-            try {
-                const btn = document.getElementById('btnAudio');
-                
-                // 1. Init if not exists
-                if (!audioCtx) {
-                    const Ctx = window.AudioContext || window.webkitAudioContext;
-                    // FIX: Removed options object for iOS compatibility
-                    audioCtx = new Ctx(); 
-                    
-                    const dest = audioCtx.createMediaStreamDestination();
-                    const audioEl = document.getElementById('audioBridge');
-                    audioEl.srcObject = dest.stream;
-                    
-                    // Promise chain for robust starting
-                    audioEl.play().catch(e => console.log('Audio Autoplay prevented', e));
-                    
-                    window.audioDest = dest;
+        updateMediaSession() {
+            if (!('mediaSession' in navigator)) return;
+            const isPlaying = audioCtx && audioCtx.state === 'running';
+            const titleStr = (state.freq > 0) ? (state.freq/1e6).toFixed(3) + ' MHz' : 'SDR Ready';
+            
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: titleStr,
+                artist: 'SDR Commander',
+                album: state.mode || 'RX',
+                artwork: [{ src: '/icon.png', sizes: '192x192', type: 'image/png' }]
+            });
 
-                    // Silent oscillator hack
-                    const osc = audioCtx.createOscillator();
-                    const g = audioCtx.createGain();
-                    osc.connect(g); 
-                    g.connect(dest);
-                    osc.frequency.value = 10;
-                    g.gain.value = 0.001;
-                    osc.start();
-                    
-                    this.updateBtnState('running');
-                    if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
-                    return;
-                }
-
-                // 2. Toggle State
-                if (audioCtx.state === 'running') {
-                    audioCtx.suspend().then(() => {
-                        this.updateBtnState('suspended');
-                        if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
-                    });
-                } else {
-                    audioCtx.resume().then(() => {
-                        this.updateBtnState('running');
-                        // Re-trigger audio element if needed
-                        document.getElementById('audioBridge').play().catch(e=>{});
-                        if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
-                    });
-                }
-            } catch(e) {
-                alert("Audio Init Error: " + e.message);
-            }
+            const action = () => this.togAudio();
+            navigator.mediaSession.setActionHandler('play', action);
+            navigator.mediaSession.setActionHandler('pause', action);
+            navigator.mediaSession.setActionHandler('stop', action);
+            navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
         },
 
         updateBtnState(s) {
@@ -659,18 +685,7 @@ const htmlContent = `
             ['off','weak','mid','strong'].forEach(k => { document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':''); });
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
-            
-            if('mediaSession' in navigator) {
-                // Wrap in try-catch for safety
-                try {
-                    navigator.mediaSession.metadata = new MediaMetadata({
-                        title: (m.freq/1e6).toFixed(3) + ' MHz',
-                        artist: 'SDR Commander',
-                        album: m.mode,
-                        artwork: [{ src: '/icon.svg', sizes: '512x512', type: 'image/svg+xml' }]
-                    });
-                } catch(e){}
-            }
+            this.updateMediaSession();
         },
         renderSq(v) {
             this.els.sq.style.left = v + '%'; 
@@ -807,6 +822,113 @@ const htmlContent = `
                         <button class="ib" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
                 </div>\`).join('');
+        }
+    };
+
+    window.ws = {
+        c: null,
+        connect() {
+            this.c = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host);
+            this.c.binaryType = 'arraybuffer';
+            this.c.onmessage = e => {
+                if(typeof e.data === 'string') {
+                    const m = JSON.parse(e.data);
+                    if(m.type==='status_update') window.ui.upd(m);
+                    else if(m.type==='bookmarks') { state.bm = m.data; window.ui.renderBM(); }
+                    else if(m.type==='recordings') window.ui.renderRec(m.data);
+                    else if(m.type==='error') alert(m.msg);
+                } else this.audio(e.data);
+            };
+            this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
+        },
+        send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
+        sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
+        setMode(m) { state.mode=m; this.tune(true); },
+        setAtt(a) { this.send({type:'set_att', att:a}); },
+        togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
+        move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
+        tune(skip=false) {
+            let f = state.freq;
+            const m = window.ui.modalMode; 
+            if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
+            const p = document.getElementById('inpPass').value;
+            this.send({type:'auth_tune', password:p, freq:f, mode:m});
+            window.ui.closeModal();
+        },
+        tuneDir(f, m) {
+            const p = document.getElementById('inpPass').value;
+            if (!p) {
+                state.freq = Math.floor(f*1e6);
+                state.mode = m;
+                document.getElementById('inpFreq').value = f.toFixed(3);
+                window.ui.selMod(m);
+                window.ui.modal('tune');
+                return;
+            }
+            this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
+            state.mode = m;
+        },
+        saveBookmark() {
+            const title = document.getElementById('addName').value;
+            if (!title) return;
+            const isFolder = (window.ui.addType === 'folder');
+            
+            if (state.editTargetId) {
+                const data = { id: state.editTargetId, title, isFolder };
+                if (!isFolder) {
+                    const freqVal = parseFloat(document.getElementById('addFreq').value);
+                    if (!freqVal) return;
+                    data.freq = freqVal;
+                    data.mode = window.ui.addMode;
+                }
+                this.send({type:'edit_bookmark', data});
+            } else {
+                const data = { title, isFolder, parentId: window.ui.targetParent };
+                if (!isFolder) {
+                    const freqVal = parseFloat(document.getElementById('addFreq').value);
+                    if (!freqVal) return;
+                    data.freq = freqVal;
+                    data.mode = window.ui.addMode;
+                }
+                this.send({type:'add_bookmark', data});
+            }
+            window.ui.closeModal();
+        },
+        del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
+        delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
+        
+        audio(b) {
+            if(!audioCtx || audioCtx.state !== 'running') return;
+
+            const dv = new DataView(b);
+            const rssi = dv.getInt16(0, true);
+            const sqlOpen = dv.getInt16(2, true);
+            
+            const bar = window.ui.els.rssi;
+            bar.style.width = Math.min(100, (rssi/200)*100)+'%';
+            if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
+            const bdgSql = document.getElementById('bdgSql');
+            if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
+            else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
+
+            // 48kHz Float32
+            const f = new Float32Array((b.byteLength - 4) / 2);
+            const s16 = new Int16Array(b, 4);
+            for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
+
+            const buf = audioCtx.createBuffer(1, f.length, 48000);
+            buf.getChannelData(0).set(f);
+
+            const now = audioCtx.currentTime;
+            if (nextStartTime < now) nextStartTime = now;
+
+            const s = audioCtx.createBufferSource();
+            s.buffer = buf;
+            if (window.audioDest) s.connect(window.audioDest);
+            else s.connect(audioCtx.destination);
+            
+            s.start(nextStartTime);
+            nextStartTime += buf.duration;
         }
     };
 
