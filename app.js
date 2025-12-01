@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Final Fixed Version
+ * Modern Web SDR - Android Fix Version
  * Core: rtl_fm -> Node.js -> Modern UI
  */
 
@@ -358,17 +358,9 @@ const htmlContent = `
     @keyframes up { from{transform:translateY(100%)}to{transform:translateY(0)} }
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
-    
-    .start-ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:#050507; z-index: 2000; display:flex; justify-content:center; align-items:center; flex-direction:column; transition: opacity 0.3s; }
-    .big-btn { background: var(--acc); color: #000; border: none; padding: 18px 40px; border-radius: 50px; font-size: 1.2rem; font-weight: 800; box-shadow: 0 0 30px var(--acc); cursor: pointer; }
 </style>
 </head>
 <body>
-    <div class="start-ovl" id="startScreen">
-        <div style="font-size:3rem; margin-bottom:20px;">📡</div>
-        <button class="big-btn" onclick="window.ui.init()">CONNECT SYSTEM</button>
-    </div>
-
     <div class="app">
         <div class="panel">
             <div class="badges">
@@ -469,18 +461,22 @@ const htmlContent = `
         targetParent: null,
         addType: 'freq',
 
-        // --- BACKGROUND AUDIO MAGIC ---
+        // --- ANDROID/IOS AUDIO UNLOCKER ---
         init() {
-            // Auto-start on ANY interaction
+            // Android Chrome requires specific interactions to unlock AudioContext
+            // We bind this to everything to ensure it wakes up on first touch
             const unlock = () => {
                 if(!audioCtx) {
-                    audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:24000});
+                    // [Android Fix] Do not force sampleRate here. Let OS decide (usually 48000).
+                    const Ctx = window.AudioContext || window.webkitAudioContext;
+                    audioCtx = new Ctx();
                     
-                    // Audio Bridge for background playback
+                    // Audio Bridge for background playback capability
                     const dest = audioCtx.createMediaStreamDestination();
                     const audioEl = document.getElementById('audioBridge');
                     audioEl.srcObject = dest.stream;
-                    audioEl.play().catch(e => console.log("Waiting for user gesture"));
+                    // Try playing. On Android this needs to be inside the event.
+                    audioEl.play().catch(e => console.log("Bg audio init pending..."));
                     window.audioDest = dest;
 
                     // Keep-alive silent oscillator
@@ -489,20 +485,16 @@ const htmlContent = `
                     osc.connect(g); g.connect(dest);
                     osc.frequency.value=10; g.gain.value=0.001; osc.start();
 
-                    // Media Session
                     if('mediaSession' in navigator) {
                         navigator.mediaSession.metadata = new MediaMetadata({title:'SDR Monitor', artist:'Receiving'});
                         navigator.mediaSession.setActionHandler('play', ()=>{ audioCtx.resume(); audioEl.play(); });
                     }
                 }
-                if(audioCtx.state==='suspended') audioCtx.resume();
+                if(audioCtx.state === 'suspended') audioCtx.resume();
             };
             
-            // Listen to any touch/click/key to unlock audio
+            // Listen to any touch/click/key to unlock audio immediately
             ['click','touchstart','keydown','scroll'].forEach(e => document.body.addEventListener(e, unlock, {once:true}));
-
-            // Hide start screen immediately
-            document.getElementById('startScreen').style.display='none';
 
             // Connect WS immediately
             window.ws.connect();
@@ -703,6 +695,8 @@ const htmlContent = `
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
             
+            // [Android Fix] Tell the browser the SOURCE is 24000. 
+            // The output hardware (48000/44100) will resample automatically.
             const buf = audioCtx.createBuffer(1, f.length, 24000);
             buf.getChannelData(0).set(f);
             
@@ -714,7 +708,11 @@ const htmlContent = `
 
             const now = audioCtx.currentTime;
             let next = (window.nextTime || 0);
+            
+            // [Android Fix] Prevent drift if playback falls behind
             if(next < now) next = now + 0.04;
+            if(next > now + 0.5) next = now + 0.1; // Reset if too far ahead (lag fix)
+
             s.start(next); 
             window.nextTime = next + buf.duration;
         }
