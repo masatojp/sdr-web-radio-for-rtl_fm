@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Manual Audio Control Version with WFM Support (Fix)
+ * Modern Web SDR - Manual Audio Control Version with WFM Fix
  * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
  */
 
@@ -21,7 +21,7 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    sampleRate: 24000, 
+    sampleRate: 24000, // 最終的な出力レート（ブラウザ再生用）
     ppm: 0,
     
     // パス設定
@@ -120,7 +120,7 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            // HPF
+            // HPF (Bass cut is minimal: 0.95 pole is roughly 200Hz at 24k? Actually it's simple DC block)
             let raw = s; 
             s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; 
             this.lastIn = raw; 
@@ -183,11 +183,21 @@ function startRadio(freq, mode, att) {
     if (att === 'mid')  gainVal = '9';
     if (att === 'strong') gainVal = '0';
 
-    let rtlMode = 'am';
-    if (mode === 'FM') rtlMode = 'fm';
-    if (mode === 'WFM') rtlMode = 'wbfm';
+    // 基本引数
+    let args = ['-f', freq.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
 
-    const args = ['-M', rtlMode, '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
+    if (mode === 'WFM') {
+        // 【修正点】WFMの場合
+        // -s 170000 : 広帯域FMに必要な帯域幅を確保するために高い入力レートを指定
+        // -r 24000  : 出力はWebアプリに合わせて24kHzにダウンサンプリング
+        args.push('-M', 'wbfm', '-s', '170000', '-r', CONFIG.sampleRate.toString());
+    } else {
+        // AM/NFMの場合
+        // 入力レート＝出力レート＝24000 でOK
+        let rtlMode = (mode === 'FM') ? 'fm' : 'am';
+        args.push('-M', rtlMode, '-s', CONFIG.sampleRate.toString());
+    }
+
     console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
     
     rtlProcess = spawn('rtl_fm', args);
@@ -310,7 +320,6 @@ server.listen(CONFIG.webPort, () => {
 // ==========================================
 // Frontend
 // ==========================================
-// Note: Client-side JS uses strict concatenation to avoid Node.js template literal parsing errors.
 const htmlContent = `
 <!DOCTYPE html>
 <html lang="ja">
@@ -556,7 +565,7 @@ const htmlContent = `
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
             
-            // FIX: Use simple string concatenation to prevent Node.js parsing error
+            // MediaSession fix
             if('mediaSession' in navigator) {
                 navigator.mediaSession.metadata.title = (m.freq/1e6).toFixed(3) + ' MHz (' + m.mode + ')';
             }
@@ -619,7 +628,6 @@ const htmlContent = `
             document.getElementById('listBM').innerHTML = this.tree(roots);
         },
         tree(nodes) {
-            // NOTE: Using escaped backticks because this string is inside another template literal in Node.js
             return nodes.map(n => {
                 if(n.isFolder) {
                     const open = state.expanded.has(n.id);
@@ -655,7 +663,6 @@ const htmlContent = `
             this.renderBM();
         },
         renderRec(list) {
-            // NOTE: Using escaped backticks
             document.getElementById('listRec').innerHTML = list.map(f => \`
                 <div class="row">
                     <div class="row-click-area">
