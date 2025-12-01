@@ -1,6 +1,6 @@
 /**
- * Modern Web SDR - Universal Audio Fix
- * Core: rtl_fm -> Node.js -> Robust Audio Scheduling
+ * Modern Web SDR - Distortion Fix Version
+ * Core: rtl_fm -> Node.js -> AGC/Limiter DSP
  */
 
 require('dotenv').config();
@@ -21,7 +21,7 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    sampleRate: 24000, // rtl_fmの出力レート
+    sampleRate: 24000, 
     ppm: 0,
     
     // パス設定
@@ -106,6 +106,14 @@ class AudioDSP {
         this.agcPeak=0; this.agcGain=1.0; 
         this.squelchGate=0.0; this.rms=0; 
     }
+    
+    // Soft Clipper (音割れ防止)
+    softClip(x) {
+        if (x > 3) return 1;
+        if (x < -3) return -1;
+        return x - (x*x*x)/27; // Simple cubic soft clip
+    }
+
     process(inputBuffer, opts) {
         const len = inputBuffer.length / 2;
         const out = Buffer.alloc(len * 2);
@@ -114,34 +122,58 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            // HPF (DC除去)
-            let raw = s; s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; this.lastIn = raw; this.lastOut = s;
-            sumSq += s * s;
             
-            // Simple AGC
+            // HPF (DCカット)
+            let raw = s; 
+            s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; 
+            this.lastIn = raw; 
+            this.lastOut = s;
+            
+            // --- 改修ポイント: AGCロジック ---
+            // ピーク検出
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
-            let g = 0.6 / (this.agcPeak + 0.05);
-            if (g > 15.0) g = 15.0; if (g < 1.0) g = 1.0;
-            this.agcGain = this.agcGain * 0.99 + g * 0.01;
             
+            // 目標レベル(0.5)に対するゲイン計算
+            let g = 0.5 / (this.agcPeak + 0.01);
+            
+            // リミット設定
+            if (g > 20.0) g = 20.0; // 最大増幅 20倍
+            if (g < 0.1) g = 0.1;   // 最小ゲイン 0.1倍 (←ここを1.0から0.1に変更し、減衰を許可)
+
+            // ゲインの平滑化
+            this.agcGain = this.agcGain * 0.995 + g * 0.005;
+            
+            // 適用
             let p = s * this.agcGain * this.squelchGate;
-            // Limiter
-            if (p > 0.98) p = 0.98; if (p < -0.98) p = -0.98;
+
+            // Soft Limiter (ハードクリップ防止)
+            if (p > 0.95 || p < -0.95) {
+                p = this.softClip(p);
+            }
+            
+            // 最終ハードリミット
+            if (p > 0.99) p = 0.99; 
+            if (p < -0.99) p = -0.99;
+
             out.writeInt16LE(Math.floor(p * 32767), i * 2);
+            
+            // Squelch用RMS計算 (AGC前の生の信号レベルで判定すべきだが、SDRの特性上AGC後の方が安定する場合もある。今回はAGC後を採用)
+            // いや、AGCが効きすぎるとノイズも持ち上がるので、スケルチ判定はAGCゲインの影響を除去した推定値で行う
+            sumSq += (s * s); 
         }
 
         const rms = Math.sqrt(sumSq / len);
-        this.rms = this.rms * 0.8 + rms * 0.2;
+        this.rms = this.rms * 0.9 + rms * 0.1;
 
-        // Instant Squelch Logic with Hysteresis
-        const open = Math.max(0.005, sqThresh); 
+        // Instant Squelch Logic
+        const open = Math.max(0.002, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
         else if (this.rms < close) this.squelchGate = 0.0;
 
         return { 
             buffer: out, 
-            rssi: Math.min(100, Math.floor(Math.sqrt(this.rms) * 200)), 
+            rssi: Math.min(100, Math.floor(Math.sqrt(this.rms) * 500)), // 感度調整
             isOpen: this.squelchGate === 1.0 
         };
     }
@@ -164,21 +196,23 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // Gain Control
-    let gainVal = '48'; // OFF = Max
-    if (att === 'weak') gainVal = '35';   // WEAK
-    if (att === 'mid')  gainVal = '10';   // MID
-    if (att === 'strong') gainVal = '0';  // STRONG
+    // Gain Control Strategy
+    // rtl_fmのゲインは 0 (Autoではない最小ゲイン) ～ 49.6 程度
+    let gainVal = '48'; // NO ATT (High Gain)
+    if (att === 'weak') gainVal = '29';   // WEAK
+    if (att === 'mid')  gainVal = '9';    // MID
+    if (att === 'strong') gainVal = '0';  // STRONG (Minimum Hardware Gain)
 
-    // -s 24000: 出力レート
+    // -s 24000: Output Rate
+    // -g: Gain
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
     console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
     
     rtlProcess = spawn('rtl_fm', args);
     
-    // Buffer for chunking
+    // Chunking Buffer for smooth processing
     let chunkBuf = Buffer.alloc(0);
-    const CHUNK_SIZE = 4096; // Adjust based on latency vs CPU
+    const CHUNK_SIZE = 4096; 
 
     rtlProcess.stdout.on('data', (c) => {
         chunkBuf = Buffer.concat([chunkBuf, c]);
@@ -195,7 +229,6 @@ function startRadio(freq, mode, att) {
 function handleAudio(raw) {
     const res = dsp.process(raw, { squelchThreshold });
     
-    // Protocol: [RSSI(2bytes)][SquelchStatus(2bytes)][PCM Data...]
     const head = new Int16Array(1); head[0] = res.rssi;
     const statusWord = res.isOpen ? 1 : 0; 
     const combo = Buffer.alloc(raw.length + 4); 
@@ -204,10 +237,7 @@ function handleAudio(raw) {
     res.buffer.copy(combo, 4);
 
     wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(combo); });
-    
-    if (isRecording && recordingStream && res.isOpen) {
-        recordingStream.write(res.buffer);
-    }
+    if (isRecording && recordingStream && res.isOpen) recordingStream.write(res.buffer);
 }
 
 function startRec() {
@@ -379,7 +409,6 @@ const htmlContent = `
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
 
-    /* Android用ロック解除ボタン (普段は隠す) */
     .audio-unlock-btn {
         position: fixed; bottom: 20px; right: 20px;
         background: #ff3b30; color: #fff;
@@ -486,7 +515,7 @@ const htmlContent = `
 <script>
     let audioCtx;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10 };
-    let nextStartTime = 0; // Seamless audio scheduling pointer
+    let nextStartTime = 0; 
 
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
@@ -496,33 +525,25 @@ const htmlContent = `
         addType: 'freq',
 
         init() {
-            // Android対策: 任意のタッチイベントでAudioContext作成を試みる
             const initAudio = () => {
                 if(!audioCtx) {
-                    // 重要: sampleRateを指定しない (OSデフォルトを使う)
                     const Ctx = window.AudioContext || window.webkitAudioContext;
                     audioCtx = new Ctx();
                     
-                    // iOS/Androidバックグラウンド再生対策
                     const dest = audioCtx.createMediaStreamDestination();
                     const audioEl = document.getElementById('audioBridge');
                     audioEl.srcObject = dest.stream;
                     audioEl.play().catch(e=>console.log("Auto-play blocked"));
                     window.audioDest = dest;
 
-                    // 無音オシレーターでコンテキストを維持
                     const osc = audioCtx.createOscillator();
                     const g = audioCtx.createGain();
                     osc.connect(g); g.connect(dest);
                     osc.frequency.value=10; g.gain.value=0.001; osc.start();
                 }
-                
-                // サスペンド状態なら再開を試みる
                 if(audioCtx && audioCtx.state === 'suspended') {
                     audioCtx.resume();
                 }
-
-                // 状態監視: 失敗し続けているならボタンを出す
                 setTimeout(() => {
                     if(!audioCtx || audioCtx.state === 'suspended') {
                         document.getElementById('unlockBtn').style.display = 'block';
@@ -532,14 +553,12 @@ const htmlContent = `
                 }, 500);
             };
 
-            // 全てのユーザーアクションで初期化を試みる
             ['click','touchstart','keydown'].forEach(e => document.body.addEventListener(e, initAudio, {once:false, capture:true}));
             
             window.ws.connect();
         },
 
         forceUnlock() {
-            // 明示的なボタンタップ時は強引にResume
             if(audioCtx) audioCtx.resume();
             document.getElementById('audioBridge').play();
             document.getElementById('unlockBtn').style.display = 'none';
@@ -729,7 +748,6 @@ const htmlContent = `
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
             
-            // UI更新
             const bar = window.ui.els.rssi;
             bar.style.width = Math.min(100, (rssi/200)*100)+'%';
             if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
@@ -737,23 +755,15 @@ const htmlContent = `
             if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
             else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
 
-            // 音声デコード (Int16 -> Float32)
             const f = new Float32Array((b.byteLength - 4) / 2);
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
 
-            // バッファ作成 (Source Rate = 24000)
             const buf = audioCtx.createBuffer(1, f.length, 24000);
             buf.getChannelData(0).set(f);
 
-            // スケジューリング (ここがブツブツ音対策の要)
             const now = audioCtx.currentTime;
-
-            // もし「次の開始予定時間」が過去になっていたら（通信遅延など）、
-            // 「現在時刻」にリセットして遅れを取り戻す
-            if (nextStartTime < now) {
-                nextStartTime = now;
-            }
+            if (nextStartTime < now) nextStartTime = now;
 
             const s = audioCtx.createBufferSource();
             s.buffer = buf;
@@ -761,8 +771,6 @@ const htmlContent = `
             else s.connect(audioCtx.destination);
             
             s.start(nextStartTime);
-            
-            // 次のパケットの開始位置を今回の終了位置にセット (隙間を作らない)
             nextStartTime += buf.duration;
         }
     };
