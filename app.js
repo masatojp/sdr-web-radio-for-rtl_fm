@@ -1,6 +1,6 @@
 /**
- * Modern Web SDR - Distortion Fix Version
- * Core: rtl_fm -> Node.js -> AGC/Limiter DSP
+ * Modern Web SDR - Manual Audio Control Version
+ * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
  */
 
 require('dotenv').config();
@@ -38,7 +38,6 @@ if (!fs.existsSync(CONFIG.recordingsPath)) fs.mkdirSync(CONFIG.recordingsPath);
 function sendDiscordNotification() {
     const rawUrl = process.env.DISCORD_WEBHOOK_URL || "";
     const webhookUrl = rawUrl.trim();
-
     if (!webhookUrl || !webhookUrl.startsWith("https://")) return;
 
     const payload = JSON.stringify({
@@ -107,11 +106,10 @@ class AudioDSP {
         this.squelchGate=0.0; this.rms=0; 
     }
     
-    // Soft Clipper (音割れ防止)
     softClip(x) {
         if (x > 3) return 1;
         if (x < -3) return -1;
-        return x - (x*x*x)/27; // Simple cubic soft clip
+        return x - (x*x*x)/27;
     }
 
     process(inputBuffer, opts) {
@@ -122,50 +120,34 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            
-            // HPF (DCカット)
+            // HPF
             let raw = s; 
             s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; 
             this.lastIn = raw; 
             this.lastOut = s;
             
-            // --- 改修ポイント: AGCロジック ---
-            // ピーク検出
+            // AGC with attenuation capability
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
-            
-            // 目標レベル(0.5)に対するゲイン計算
             let g = 0.5 / (this.agcPeak + 0.01);
-            
-            // リミット設定
-            if (g > 20.0) g = 20.0; // 最大増幅 20倍
-            if (g < 0.1) g = 0.1;   // 最小ゲイン 0.1倍 (←ここを1.0から0.1に変更し、減衰を許可)
+            if (g > 20.0) g = 20.0; 
+            if (g < 0.1) g = 0.1;
 
-            // ゲインの平滑化
             this.agcGain = this.agcGain * 0.995 + g * 0.005;
-            
-            // 適用
             let p = s * this.agcGain * this.squelchGate;
 
-            // Soft Limiter (ハードクリップ防止)
-            if (p > 0.95 || p < -0.95) {
-                p = this.softClip(p);
-            }
-            
-            // 最終ハードリミット
+            // Soft Limiter
+            if (p > 0.95 || p < -0.95) p = this.softClip(p);
             if (p > 0.99) p = 0.99; 
             if (p < -0.99) p = -0.99;
 
             out.writeInt16LE(Math.floor(p * 32767), i * 2);
-            
-            // Squelch用RMS計算 (AGC前の生の信号レベルで判定すべきだが、SDRの特性上AGC後の方が安定する場合もある。今回はAGC後を採用)
-            // いや、AGCが効きすぎるとノイズも持ち上がるので、スケルチ判定はAGCゲインの影響を除去した推定値で行う
             sumSq += (s * s); 
         }
 
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.9 + rms * 0.1;
 
-        // Instant Squelch Logic
+        // Squelch Hysteresis
         const open = Math.max(0.002, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -173,7 +155,7 @@ class AudioDSP {
 
         return { 
             buffer: out, 
-            rssi: Math.min(100, Math.floor(Math.sqrt(this.rms) * 500)), // 感度調整
+            rssi: Math.min(100, Math.floor(Math.sqrt(this.rms) * 500)), 
             isOpen: this.squelchGate === 1.0 
         };
     }
@@ -196,21 +178,15 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // Gain Control Strategy
-    // rtl_fmのゲインは 0 (Autoではない最小ゲイン) ～ 49.6 程度
-    let gainVal = '48'; // NO ATT (High Gain)
-    if (att === 'weak') gainVal = '29';   // WEAK
-    if (att === 'mid')  gainVal = '9';    // MID
-    if (att === 'strong') gainVal = '0';  // STRONG (Minimum Hardware Gain)
+    let gainVal = '48'; 
+    if (att === 'weak') gainVal = '29';
+    if (att === 'mid')  gainVal = '9';
+    if (att === 'strong') gainVal = '0';
 
-    // -s 24000: Output Rate
-    // -g: Gain
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
     console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
     
     rtlProcess = spawn('rtl_fm', args);
-    
-    // Chunking Buffer for smooth processing
     let chunkBuf = Buffer.alloc(0);
     const CHUNK_SIZE = 4096; 
 
@@ -222,13 +198,11 @@ function startRadio(freq, mode, att) {
             handleAudio(chunk);
         }
     });
-
     setTimeout(() => broadcastStatus(), 500);
 }
 
 function handleAudio(raw) {
     const res = dsp.process(raw, { squelchThreshold });
-    
     const head = new Int16Array(1); head[0] = res.rssi;
     const statusWord = res.isOpen ? 1 : 0; 
     const combo = Buffer.alloc(raw.length + 4); 
@@ -311,25 +285,14 @@ wss.on('connection', ws => {
     ws.on('message', m => {
         try {
             const c = JSON.parse(m);
-            if (c.type === 'auth_tune') {
-                if (c.password === CONFIG.password) startRadio(c.freq, c.mode, currentAtt);
-            }
+            if (c.type === 'auth_tune') { if (c.password === CONFIG.password) startRadio(c.freq, c.mode, currentAtt); }
             else if (c.type === 'set_att') startRadio(currentFreq, currentMode, c.att);
             else if (c.type === 'set_squelch') { squelchThreshold = c.val; squelchDB[currentFreq] = c.val; saveData(); broadcastStatus(); }
             else if (c.type === 'start_recording') startRec();
             else if (c.type === 'stop_recording') stopRec();
             else if (c.type === 'delete_recording') { fs.unlinkSync(path.join(CONFIG.recordingsPath, c.filename)); broadcastRecordings(); }
-            else if (c.type === 'add_bookmark') { 
-                c.data.id = Date.now().toString(); 
-                bookmarks.push(c.data); 
-                saveData(); 
-                ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
-            }
-            else if (c.type === 'delete_bookmark') { 
-                bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); 
-                saveData(); 
-                ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); 
-            }
+            else if (c.type === 'add_bookmark') { c.data.id = Date.now().toString(); bookmarks.push(c.data); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
+            else if (c.type === 'delete_bookmark') { bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
         } catch(e){}
     });
 });
@@ -353,7 +316,7 @@ const htmlContent = `
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
 <style>
-    :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; }
+    :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; }
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
     .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
     .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
@@ -384,6 +347,21 @@ const htmlContent = `
     .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
     @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
 
+    /* New Start/Stop Button */
+    .btn-audio-toggle {
+        width: 100%; padding: 16px; 
+        background: rgba(0,255,200,0.15); border: 1px solid var(--acc); color: var(--acc);
+        border-radius: 14px; font-weight: 800; font-size: 1rem; cursor: pointer;
+        display: flex; justify-content: center; align-items: center; gap: 10px;
+        transition: 0.2s; box-shadow: 0 0 15px rgba(0,255,200,0.1);
+        margin-bottom: 5px; /* Spacing above TUNE */
+    }
+    .btn-audio-toggle.stop {
+        background: rgba(255, 59, 48, 0.15); border-color: var(--stop); color: var(--stop);
+        box-shadow: 0 0 15px rgba(255, 59, 48, 0.1);
+    }
+    .btn-audio-toggle:active { transform: scale(0.98); }
+
     .section-header { display: flex; justify-content: space-between; align-items: center; margin: 24px 4px 8px 4px; }
     .section-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; color: var(--sub); }
     .btn-add { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; cursor: pointer; margin-left: 8px; }
@@ -391,7 +369,6 @@ const htmlContent = `
     .tree { display: flex; flex-direction: column; gap: 2px; }
     .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; transition: background 0.1s; }
     .row:hover { background: rgba(255,255,255,0.05); }
-    .row:active { background: rgba(255,255,255,0.08); }
     .row-click-area { display: flex; align-items: center; flex: 1; height: 100%; } 
     .folder-c { margin-left: 10px; border-left: 2px solid rgba(255,255,255,0.1); padding-left: 10px; display: none; }
     .folder-c.open { display: block; }
@@ -401,28 +378,15 @@ const htmlContent = `
     .sub { font-size: 0.8rem; color: var(--sub); }
     .act { display: flex; gap: 4px; }
     .ib { background: transparent; border: none; color: var(--sub); padding: 8px; cursor: pointer; border-radius: 50%; z-index: 10; }
-    .ib:active { background: rgba(255,255,255,0.1); color: #fff; }
 
     .ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); backdrop-filter:blur(8px); display:none; justify-content:center; align-items:flex-end; z-index: 1000; }
     .card { background: #1a1b20; width:100%; max-width:480px; padding:30px; border-radius:24px 24px 0 0; box-shadow: 0 -10px 40px #000; animation: up 0.3s; }
     @keyframes up { from{transform:translateY(100%)}to{transform:translateY(0)} }
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
-
-    .audio-unlock-btn {
-        position: fixed; bottom: 20px; right: 20px;
-        background: #ff3b30; color: #fff;
-        padding: 15px 30px; border-radius: 50px;
-        font-weight: bold; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-        z-index: 9999; display: none; cursor: pointer;
-        animation: pulse 2s infinite;
-    }
-    @keyframes pulse { 0%{transform:scale(1);} 50%{transform:scale(1.05);} 100%{transform:scale(1);} }
 </style>
 </head>
 <body>
-    <div class="audio-unlock-btn" id="unlockBtn" onclick="window.ui.forceUnlock()">TAP TO UNMUTE 🔇</div>
-
     <div class="app">
         <div class="panel">
             <div class="badges">
@@ -451,6 +415,10 @@ const htmlContent = `
         </div>
 
         <div class="ctrls">
+            <button class="btn-audio-toggle" id="btnAudio" onclick="window.ui.togAudio()">
+                <span class="material-symbols-outlined">volume_up</span> START LISTENING
+            </button>
+
             <div class="btn-row">
                 <button class="btn btn-tune" style="flex:2" onclick="window.ui.modal('tune')"><span class="material-symbols-outlined">dialpad</span> TUNE</button>
                 <button class="btn" id="btnRec" style="flex:1" onclick="window.ws.togRec()"><span class="material-symbols-outlined">fiber_manual_record</span> REC</button>
@@ -525,43 +493,51 @@ const htmlContent = `
         addType: 'freq',
 
         init() {
-            const initAudio = () => {
-                if(!audioCtx) {
-                    const Ctx = window.AudioContext || window.webkitAudioContext;
-                    audioCtx = new Ctx();
-                    
-                    const dest = audioCtx.createMediaStreamDestination();
-                    const audioEl = document.getElementById('audioBridge');
-                    audioEl.srcObject = dest.stream;
-                    audioEl.play().catch(e=>console.log("Auto-play blocked"));
-                    window.audioDest = dest;
-
-                    const osc = audioCtx.createOscillator();
-                    const g = audioCtx.createGain();
-                    osc.connect(g); g.connect(dest);
-                    osc.frequency.value=10; g.gain.value=0.001; osc.start();
-                }
-                if(audioCtx && audioCtx.state === 'suspended') {
-                    audioCtx.resume();
-                }
-                setTimeout(() => {
-                    if(!audioCtx || audioCtx.state === 'suspended') {
-                        document.getElementById('unlockBtn').style.display = 'block';
-                    } else {
-                        document.getElementById('unlockBtn').style.display = 'none';
-                    }
-                }, 500);
-            };
-
-            ['click','touchstart','keydown'].forEach(e => document.body.addEventListener(e, initAudio, {once:false, capture:true}));
-            
             window.ws.connect();
         },
 
-        forceUnlock() {
-            if(audioCtx) audioCtx.resume();
-            document.getElementById('audioBridge').play();
-            document.getElementById('unlockBtn').style.display = 'none';
+        // Manual Audio Toggle Control
+        togAudio() {
+            const btn = document.getElementById('btnAudio');
+            
+            // 1. Init if not exists
+            if (!audioCtx) {
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                audioCtx = new Ctx(); 
+                
+                // Background keep-alive
+                const dest = audioCtx.createMediaStreamDestination();
+                const audioEl = document.getElementById('audioBridge');
+                audioEl.srcObject = dest.stream;
+                audioEl.play().catch(e=>{});
+                window.audioDest = dest;
+
+                const osc = audioCtx.createOscillator();
+                const g = audioCtx.createGain();
+                osc.connect(g); g.connect(dest);
+                osc.frequency.value=10; g.gain.value=0.001; osc.start();
+                
+                this.updateBtnState('running');
+                return;
+            }
+
+            // 2. Toggle State
+            if (audioCtx.state === 'running') {
+                audioCtx.suspend().then(() => this.updateBtnState('suspended'));
+            } else {
+                audioCtx.resume().then(() => this.updateBtnState('running'));
+            }
+        },
+
+        updateBtnState(s) {
+            const btn = document.getElementById('btnAudio');
+            if (s === 'running') {
+                btn.innerHTML = '<span class="material-symbols-outlined">volume_off</span> STOP LISTENING';
+                btn.className = 'btn-audio-toggle stop';
+            } else {
+                btn.innerHTML = '<span class="material-symbols-outlined">volume_up</span> START LISTENING';
+                btn.className = 'btn-audio-toggle';
+            }
         },
 
         upd(m) {
@@ -742,7 +718,8 @@ const htmlContent = `
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
         
         audio(b) {
-            if(!audioCtx) return;
+            // If audio is not manually started, ignore packets to save CPU/battery
+            if(!audioCtx || audioCtx.state !== 'running') return;
 
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
