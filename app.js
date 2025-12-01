@@ -724,3 +724,4 @@ const htmlContent = `
 </script>
 </body>
 </html>
+`;
