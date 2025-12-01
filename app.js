@@ -1,5 +1,6 @@
 /**
- * Modern Web SDR - Manual Audio Control Version with WFM Fix & Bookmark Editing
+ * Modern Web SDR - Manual Audio Control Version
+ * Features: WFM Support, Bookmark Editing, Reordering
  * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
  */
 
@@ -312,6 +313,31 @@ wss.on('connection', ws => {
                     ws.send(JSON.stringify({type:'bookmarks', data:bookmarks}));
                 }
             }
+            else if (c.type === 'move_bookmark') {
+                const { id, dir } = c;
+                const item = bookmarks.find(b => b.id === id);
+                if (item) {
+                    // 同じ階層（同じ親）の兄弟要素を取得
+                    const siblings = bookmarks.filter(b => b.parentId === item.parentId);
+                    const index = siblings.findIndex(b => b.id === id);
+                    
+                    // 移動先の兄弟要素を特定
+                    let swapTarget = null;
+                    if (dir === 'up' && index > 0) swapTarget = siblings[index - 1];
+                    else if (dir === 'down' && index < siblings.length - 1) swapTarget = siblings[index + 1];
+                    
+                    if (swapTarget) {
+                        // グローバル配列内でのインデックスを取得してスワップ
+                        const globalIndex = bookmarks.findIndex(b => b.id === id);
+                        const globalTargetIndex = bookmarks.findIndex(b => b.id === swapTarget.id);
+                        
+                        [bookmarks[globalIndex], bookmarks[globalTargetIndex]] = [bookmarks[globalTargetIndex], bookmarks[globalIndex]];
+                        
+                        saveData();
+                        ws.send(JSON.stringify({type:'bookmarks', data:bookmarks}));
+                    }
+                }
+            }
             else if (c.type === 'delete_bookmark') { bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
         } catch(e){}
     });
@@ -396,7 +422,9 @@ const htmlContent = `
     .txt { display: flex; flex-direction: column; }
     .sub { font-size: 0.8rem; color: var(--sub); }
     .act { display: flex; gap: 4px; }
-    .ib { background: transparent; border: none; color: var(--sub); padding: 8px; cursor: pointer; border-radius: 50%; z-index: 10; }
+    .ib { background: transparent; border: none; color: var(--sub); padding: 8px; cursor: pointer; border-radius: 50%; z-index: 10; display:flex; align-items:center; justify-content:center; }
+    .ib-move { opacity: 0.5; transform: scale(0.9); }
+    .ib-move:hover { opacity: 1; }
 
     .ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); backdrop-filter:blur(8px); display:none; justify-content:center; align-items:flex-end; z-index: 1000; }
     .card { background: #1a1b20; width:100%; max-width:480px; padding:30px; border-radius:24px 24px 0 0; box-shadow: 0 -10px 40px #000; animation: up 0.3s; }
@@ -609,15 +637,12 @@ const htmlContent = `
                 }
                 document.getElementById('addName').focus();
             } else if (type === 'edit') {
-                // Edit Mode
                 const target = state.bm.find(b => b.id === id);
                 if (!target) return;
-                
                 state.editTargetId = id;
                 document.getElementById('modalAdd').style.display = 'flex';
                 this.addType = target.isFolder ? 'folder' : 'freq';
                 document.getElementById('addTitle').innerText = target.isFolder ? "Edit Folder" : "Edit Channel";
-                
                 document.getElementById('addName').value = target.title;
                 if (target.isFolder) {
                      document.getElementById('addFreqGroup').style.display = 'none';
@@ -652,7 +677,14 @@ const htmlContent = `
             document.getElementById('listBM').innerHTML = this.tree(roots);
         },
         tree(nodes) {
-            return nodes.map(n => {
+            return nodes.map((n, idx) => {
+                const isFirst = idx === 0;
+                const isLast = idx === nodes.length - 1;
+                const moveBtns = \`
+                    \${!isFirst ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'up')"><span class="material-symbols-outlined">arrow_upward</span></button>\` : ''}
+                    \${!isLast ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>\` : ''}
+                \`;
+
                 if(n.isFolder) {
                     const open = state.expanded.has(n.id);
                     return \`
@@ -663,6 +695,7 @@ const htmlContent = `
                                     <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
                                 </div>
                                 <div class="act">
+                                    \${moveBtns}
                                     <button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')"><span class="material-symbols-outlined">add</span></button>
                                     <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
                                     <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
@@ -679,8 +712,11 @@ const htmlContent = `
                                 <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
                             </div>
                         </div>
-                        <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
-                        <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                        <div class="act">
+                            \${moveBtns}
+                            <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
+                            <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                        </div>
                     </div>\`;
             }).join('');
         },
@@ -726,6 +762,7 @@ const htmlContent = `
         setMode(m) { state.mode=m; this.tune(true); },
         setAtt(a) { this.send({type:'set_att', att:a}); },
         togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
+        move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
         tune(skip=false) {
             let f = state.freq;
             const m = window.ui.modalMode; 
@@ -752,7 +789,6 @@ const htmlContent = `
             if (!title) return;
             const isFolder = (window.ui.addType === 'folder');
             
-            // Edit Mode Check
             if (state.editTargetId) {
                 const data = { id: state.editTargetId, title, isFolder };
                 if (!isFolder) {
@@ -763,7 +799,6 @@ const htmlContent = `
                 }
                 this.send({type:'edit_bookmark', data});
             } else {
-                // Add Mode
                 const data = { title, isFolder, parentId: window.ui.targetParent };
                 if (!isFolder) {
                     const freqVal = parseFloat(document.getElementById('addFreq').value);
@@ -779,7 +814,6 @@ const htmlContent = `
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
         
         audio(b) {
-            // If audio is not manually started, ignore packets to save CPU/battery
             if(!audioCtx || audioCtx.state !== 'running') return;
 
             const dv = new DataView(b);
