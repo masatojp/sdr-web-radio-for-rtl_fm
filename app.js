@@ -1,7 +1,6 @@
 /**
- * Modern Web SDR - Manual Audio Control Version
- * Features: WFM Support (High Quality), Bookmark Editing, Reordering
- * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
+ * Modern Web SDR - PWA & Background Audio Edition
+ * Features: WFM (48kHz), Edit/Move Bookmarks, PWA Support, Lock Screen Controls
  */
 
 require('dotenv').config();
@@ -22,7 +21,6 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    // 【改善】ピー音対策：48kHzに上げることで19kHzのパイロット信号の折り返しノイズを防ぐ
     sampleRate: 48000, 
     ppm: 0,
     
@@ -188,8 +186,6 @@ function startRadio(freq, mode, att) {
     let args = ['-f', freq.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
 
     if (mode === 'WFM') {
-        // 【改善】240k入力 -> 48k出力 (5倍ダウンサンプリング)
-        // 整数倍での変換により計算誤差ノイズを低減し、帯域も確保
         args.push('-M', 'wbfm', '-s', '240000', '-r', CONFIG.sampleRate.toString());
     } else {
         let rtlMode = (mode === 'FM') ? 'fm' : 'am';
@@ -267,11 +263,49 @@ function writeWavHeader(s, r, l) {
 }
 
 // ==========================================
-// Server
+// Server & PWA Assets
 // ==========================================
+// PWA Manifest
+const manifestJSON = JSON.stringify({
+    "name": "SDR Commander",
+    "short_name": "SDR",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#050507",
+    "theme_color": "#00ffc8",
+    "icons": [{ "src": "/icon.svg", "sizes": "512x512", "type": "image/svg+xml" }]
+});
+
+// PWA Service Worker (Minimal Cache Strategy)
+const swJS = `
+self.addEventListener('install', (e) => { e.waitUntil(self.skipWaiting()); });
+self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
+self.addEventListener('fetch', (e) => {
+    // Live streaming app, mostly network only, but handle manifest/icon
+    const url = new URL(e.request.url);
+    if (url.pathname === '/' || url.pathname.endsWith('.js') || url.pathname.endsWith('.json') || url.pathname.endsWith('.svg')) {
+        e.respondWith(fetch(e.request));
+    }
+});
+`;
+
+// PWA Icon (Generated SVG)
+const iconSVG = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+    <rect width="512" height="512" fill="#050507"/>
+    <circle cx="256" cy="256" r="200" stroke="#00ffc8" stroke-width="20" fill="none"/>
+    <path d="M256 100 L256 256 L350 350" stroke="#00ffc8" stroke-width="30" stroke-linecap="round"/>
+    <circle cx="256" cy="256" r="30" fill="#00ffc8"/>
+    <text x="50%" y="85%" text-anchor="middle" fill="#fff" font-family="sans-serif" font-weight="bold" font-size="60">SDR</text>
+</svg>
+`;
+
 const server = http.createServer((req, res) => {
     const u = new URL(req.url, `http://${req.headers.host}`);
     if (u.pathname === '/') { res.writeHead(200,{'Content-Type':'text/html'}); res.end(htmlContent); }
+    else if (u.pathname === '/manifest.json') { res.writeHead(200,{'Content-Type':'application/json'}); res.end(manifestJSON); }
+    else if (u.pathname === '/sw.js') { res.writeHead(200,{'Content-Type':'application/javascript'}); res.end(swJS); }
+    else if (u.pathname === '/icon.svg') { res.writeHead(200,{'Content-Type':'image/svg+xml'}); res.end(iconSVG); }
     else if (u.pathname.startsWith('/download/')) {
         const f = path.basename(decodeURIComponent(u.pathname));
         const fp = path.join(CONFIG.recordingsPath, f);
@@ -355,6 +389,12 @@ const htmlContent = `
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#050507">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
 <title>SDR COMMANDER</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
@@ -524,9 +564,11 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" style="display:none;" playsinline></audio>
+    <audio id="audioBridge" style="display:none;" autoplay playsinline></audio>
 
 <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+
     let audioCtx;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null };
     let nextStartTime = 0; 
@@ -540,38 +582,59 @@ const htmlContent = `
 
         init() {
             window.ws.connect();
+            // Media Session Handling for Background/LockScreen Control
+            if('mediaSession' in navigator) {
+                navigator.mediaSession.setActionHandler('play', () => this.togAudio());
+                navigator.mediaSession.setActionHandler('pause', () => this.togAudio());
+                navigator.mediaSession.setActionHandler('stop', () => this.togAudio());
+            }
         },
 
-        // Manual Audio Toggle Control
+        // Manual Audio Toggle Control with Background Optimization
         togAudio() {
             const btn = document.getElementById('btnAudio');
             
             // 1. Init if not exists
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
-                audioCtx = new Ctx(); 
+                audioCtx = new Ctx({ latencyHint: 'playback' }); 
                 
-                // Background keep-alive
+                // Background keep-alive using MediaStreamDestination -> <audio>
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
-                audioEl.play().catch(e=>{});
+                
+                // Ensure audio element plays to trigger OS background audio mode
+                audioEl.play().catch(e => console.log('Audio Play Blocked', e));
+                
                 window.audioDest = dest;
 
+                // Silent oscillator to keep AudioContext active even if radio is squelched
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
-                osc.connect(g); g.connect(dest);
-                osc.frequency.value=10; g.gain.value=0.001; osc.start();
+                osc.connect(g); 
+                g.connect(dest);
+                osc.frequency.value = 10; // Inaudible low freq
+                g.gain.value = 0.001; // Nearly silence
+                osc.start();
                 
                 this.updateBtnState('running');
+                if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
                 return;
             }
 
             // 2. Toggle State
             if (audioCtx.state === 'running') {
-                audioCtx.suspend().then(() => this.updateBtnState('suspended'));
+                audioCtx.suspend().then(() => {
+                    this.updateBtnState('suspended');
+                    if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+                });
             } else {
-                audioCtx.resume().then(() => this.updateBtnState('running'));
+                audioCtx.resume().then(() => {
+                    this.updateBtnState('running');
+                    document.getElementById('audioBridge').play(); // Re-trigger audio element
+                    if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+                });
             }
         },
 
@@ -597,7 +660,12 @@ const htmlContent = `
             this.renderSq(m.squelch);
             
             if('mediaSession' in navigator) {
-                navigator.mediaSession.metadata.title = (m.freq/1e6).toFixed(3) + ' MHz (' + m.mode + ')';
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: (m.freq/1e6).toFixed(3) + ' MHz',
+                    artist: 'SDR Commander',
+                    album: m.mode,
+                    artwork: [{ src: '/icon.svg', sizes: '512x512', type: 'image/svg+xml' }]
+                });
             }
         },
         renderSq(v) {
@@ -735,113 +803,6 @@ const htmlContent = `
                         <button class="ib" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
                 </div>\`).join('');
-        }
-    };
-
-    window.ws = {
-        c: null,
-        connect() {
-            this.c = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host);
-            this.c.binaryType = 'arraybuffer';
-            this.c.onmessage = e => {
-                if(typeof e.data === 'string') {
-                    const m = JSON.parse(e.data);
-                    if(m.type==='status_update') window.ui.upd(m);
-                    else if(m.type==='bookmarks') { state.bm = m.data; window.ui.renderBM(); }
-                    else if(m.type==='recordings') window.ui.renderRec(m.data);
-                    else if(m.type==='error') alert(m.msg);
-                } else this.audio(e.data);
-            };
-            this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
-        },
-        send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
-        sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
-        setMode(m) { state.mode=m; this.tune(true); },
-        setAtt(a) { this.send({type:'set_att', att:a}); },
-        togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
-        move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
-        tune(skip=false) {
-            let f = state.freq;
-            const m = window.ui.modalMode; 
-            if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
-            const p = document.getElementById('inpPass').value;
-            this.send({type:'auth_tune', password:p, freq:f, mode:m});
-            window.ui.closeModal();
-        },
-        tuneDir(f, m) {
-            const p = document.getElementById('inpPass').value;
-            if (!p) {
-                state.freq = Math.floor(f*1e6);
-                state.mode = m;
-                document.getElementById('inpFreq').value = f.toFixed(3);
-                window.ui.selMod(m);
-                window.ui.modal('tune');
-                return;
-            }
-            this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
-            state.mode = m;
-        },
-        saveBookmark() {
-            const title = document.getElementById('addName').value;
-            if (!title) return;
-            const isFolder = (window.ui.addType === 'folder');
-            
-            if (state.editTargetId) {
-                const data = { id: state.editTargetId, title, isFolder };
-                if (!isFolder) {
-                    const freqVal = parseFloat(document.getElementById('addFreq').value);
-                    if (!freqVal) return;
-                    data.freq = freqVal;
-                    data.mode = window.ui.addMode;
-                }
-                this.send({type:'edit_bookmark', data});
-            } else {
-                const data = { title, isFolder, parentId: window.ui.targetParent };
-                if (!isFolder) {
-                    const freqVal = parseFloat(document.getElementById('addFreq').value);
-                    if (!freqVal) return;
-                    data.freq = freqVal;
-                    data.mode = window.ui.addMode;
-                }
-                this.send({type:'add_bookmark', data});
-            }
-            window.ui.closeModal();
-        },
-        del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
-        delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
-        
-        audio(b) {
-            if(!audioCtx || audioCtx.state !== 'running') return;
-
-            const dv = new DataView(b);
-            const rssi = dv.getInt16(0, true);
-            const sqlOpen = dv.getInt16(2, true);
-            
-            const bar = window.ui.els.rssi;
-            bar.style.width = Math.min(100, (rssi/200)*100)+'%';
-            if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
-            const bdgSql = document.getElementById('bdgSql');
-            if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
-            else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
-
-            // Updated for 48kHz
-            const f = new Float32Array((b.byteLength - 4) / 2);
-            const s16 = new Int16Array(b, 4);
-            for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
-
-            const buf = audioCtx.createBuffer(1, f.length, 48000);
-            buf.getChannelData(0).set(f);
-
-            const now = audioCtx.currentTime;
-            if (nextStartTime < now) nextStartTime = now;
-
-            const s = audioCtx.createBufferSource();
-            s.buffer = buf;
-            if (window.audioDest) s.connect(window.audioDest);
-            else s.connect(audioCtx.destination);
-            
-            s.start(nextStartTime);
-            nextStartTime += buf.duration;
         }
     };
 
