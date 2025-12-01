@@ -1,6 +1,6 @@
 /**
- * Modern Web SDR - FM Broadcast Fix Version
- * Core: rtl_fm -> Node.js -> Auto WBFM Switching
+ * Modern Web SDR - Final Completed Version
+ * Fixes: Android Audio, Distortion, FM Broadcast, Syntax Errors
  */
 
 require('dotenv').config();
@@ -129,7 +129,7 @@ class AudioDSP {
             // AGC with attenuation capability
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             
-            // [Fix] Target level reduced from 0.5 to 0.4 for more headroom
+            // Target Level 0.4 (Headroom for FM Broadcast)
             let g = 0.4 / (this.agcPeak + 0.01);
             if (g > 20.0) g = 20.0; 
             if (g < 0.1) g = 0.1;
@@ -190,15 +190,13 @@ function startRadio(freq, mode, att) {
     let rtlMode = (mode === 'FM' ? 'fm' : 'am');
     let useDeemp = false;
 
-    // 日本のFM放送(76-95MHz) + 海外FM(87.5-108MHz) の範囲なら Wide FM (wbfm) を強制
     if (mode === 'FM' && freq >= 76000000 && freq <= 108000000) {
         rtlMode = 'wbfm';
-        useDeemp = true; // FM放送はディエンファシスが必要
+        useDeemp = true; 
     }
 
     const args = ['-M', rtlMode, '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
     
-    // Add de-emphasis filter for better broadcast audio quality
     if (useDeemp) {
         args.push('-E', 'deemp');
     }
@@ -677,4 +675,4 @@ const htmlContent = `
 </script>
 </body>
 </html>
-`;
+`; // END
