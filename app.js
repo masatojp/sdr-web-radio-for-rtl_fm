@@ -1,5 +1,5 @@
 /**
- * Modern Web SDR - Manual Audio Control Version with WFM Support
+ * Modern Web SDR - Manual Audio Control Version with WFM Support (Fix)
  * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
  */
 
@@ -21,7 +21,7 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    sampleRate: 24000, // WFMの場合、rtl_fmは内部でダウンサンプリングを行いますが、出力レートはこの値に合わせられます
+    sampleRate: 24000, 
     ppm: 0,
     
     // パス設定
@@ -126,7 +126,7 @@ class AudioDSP {
             this.lastIn = raw; 
             this.lastOut = s;
             
-            // AGC with attenuation capability
+            // AGC
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.5 / (this.agcPeak + 0.01);
             if (g > 20.0) g = 20.0; 
@@ -183,7 +183,6 @@ function startRadio(freq, mode, att) {
     if (att === 'mid')  gainVal = '9';
     if (att === 'strong') gainVal = '0';
 
-    // モード引数の決定
     let rtlMode = 'am';
     if (mode === 'FM') rtlMode = 'fm';
     if (mode === 'WFM') rtlMode = 'wbfm';
@@ -311,6 +310,7 @@ server.listen(CONFIG.webPort, () => {
 // ==========================================
 // Frontend
 // ==========================================
+// Note: Client-side JS uses strict concatenation to avoid Node.js template literal parsing errors.
 const htmlContent = `
 <!DOCTYPE html>
 <html lang="ja">
@@ -352,14 +352,13 @@ const htmlContent = `
     .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
     @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
 
-    /* New Start/Stop Button */
     .btn-audio-toggle {
         width: 100%; padding: 16px; 
         background: rgba(0,255,200,0.15); border: 1px solid var(--acc); color: var(--acc);
         border-radius: 14px; font-weight: 800; font-size: 1rem; cursor: pointer;
         display: flex; justify-content: center; align-items: center; gap: 10px;
         transition: 0.2s; box-shadow: 0 0 15px rgba(0,255,200,0.1);
-        margin-bottom: 5px; /* Spacing above TUNE */
+        margin-bottom: 5px;
     }
     .btn-audio-toggle.stop {
         background: rgba(255, 59, 48, 0.15); border-color: var(--stop); color: var(--stop);
@@ -556,7 +555,11 @@ const htmlContent = `
             ['off','weak','mid','strong'].forEach(k => { document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':''); });
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
-            if('mediaSession' in navigator) navigator.mediaSession.metadata.title = `${(m.freq/1e6).toFixed(3)} MHz (${m.mode})`;
+            
+            // FIX: Use simple string concatenation to prevent Node.js parsing error
+            if('mediaSession' in navigator) {
+                navigator.mediaSession.metadata.title = (m.freq/1e6).toFixed(3) + ' MHz (' + m.mode + ')';
+            }
         },
         renderSq(v) {
             this.els.sq.style.left = v + '%'; 
@@ -616,34 +619,35 @@ const htmlContent = `
             document.getElementById('listBM').innerHTML = this.tree(roots);
         },
         tree(nodes) {
+            // NOTE: Using escaped backticks because this string is inside another template literal in Node.js
             return nodes.map(n => {
                 if(n.isFolder) {
                     const open = state.expanded.has(n.id);
-                    return `
+                    return \`
                         <div>
-                            <div class="row" onclick="window.ui.tog('${n.id}')">
+                            <div class="row" onclick="window.ui.tog('\${n.id}')">
                                 <div class="row-click-area">
-                                    <span class="material-symbols-outlined icon ${open?'rot':''}">chevron_right</span>
-                                    <span style="font-weight:600; margin-left:10px;">${n.title}</span>
+                                    <span class="material-symbols-outlined icon \${open?'rot':''}">chevron_right</span>
+                                    <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
                                 </div>
                                 <div class="act">
-                                    <button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '${n.id}')"><span class="material-symbols-outlined">add</span></button>
-                                    <button class="ib" onclick="event.stopPropagation(); window.ws.del('${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                                    <button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')"><span class="material-symbols-outlined">add</span></button>
+                                    <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
                                 </div>
                             </div>
-                            <div class="folder-c ${open?'open':''}">${this.tree(n.c)}</div>
-                        </div>`;
+                            <div class="folder-c \${open?'open':''}">\${this.tree(n.c)}</div>
+                        </div>\`;
                 }
-                return `
-                    <div class="row" onclick="window.ws.tuneDir(${n.freq}, '${n.mode}')">
+                return \`
+                    <div class="row" onclick="window.ws.tuneDir(\${n.freq}, '\${n.mode}')">
                         <div class="row-click-area">
                             <div class="txt">
-                                <span style="font-weight:600;">${n.title}</span>
-                                <span class="sub">${n.freq.toFixed(3)} MHz ${n.mode}</span>
+                                <span style="font-weight:600;">\${n.title}</span>
+                                <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
                             </div>
                         </div>
-                        <button class="ib" onclick="event.stopPropagation(); window.ws.del('${n.id}')"><span class="material-symbols-outlined">delete</span></button>
-                    </div>`;
+                        <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                    </div>\`;
             }).join('');
         },
         tog(id) {
@@ -651,19 +655,20 @@ const htmlContent = `
             this.renderBM();
         },
         renderRec(list) {
-            document.getElementById('listRec').innerHTML = list.map(f => `
+            // NOTE: Using escaped backticks
+            document.getElementById('listRec').innerHTML = list.map(f => \`
                 <div class="row">
                     <div class="row-click-area">
                         <div class="txt">
-                            <span style="font-weight:600;">${f.name.split('_')[2]||f.name}</span>
-                            <span class="sub">${(f.size/1024/1024).toFixed(2)} MB</span>
+                            <span style="font-weight:600;">\${f.name.split('_')[2]||f.name}</span>
+                            <span class="sub">\${(f.size/1024/1024).toFixed(2)} MB</span>
                         </div>
                     </div>
                     <div class="act">
-                        <a href="/download/${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
-                        <button class="ib" onclick="window.ws.delRec('${f.name}')"><span class="material-symbols-outlined">delete</span></button>
+                        <a href="/download/\${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
+                        <button class="ib" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
-                </div>`).join('');
+                </div>\`).join('');
         }
     };
 
