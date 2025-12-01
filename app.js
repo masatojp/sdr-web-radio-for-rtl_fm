@@ -1,6 +1,6 @@
 /**
- * Modern Web SDR - PWA & Background Audio Edition
- * Features: WFM (48kHz), Edit/Move Bookmarks, PWA Support, Lock Screen Controls
+ * Modern Web SDR - Stable PWA Edition
+ * Fix: iOS Safari AudioContext compatibility & Error Handling
  */
 
 require('dotenv').config();
@@ -265,7 +265,6 @@ function writeWavHeader(s, r, l) {
 // ==========================================
 // Server & PWA Assets
 // ==========================================
-// PWA Manifest
 const manifestJSON = JSON.stringify({
     "name": "SDR Commander",
     "short_name": "SDR",
@@ -276,12 +275,10 @@ const manifestJSON = JSON.stringify({
     "icons": [{ "src": "/icon.svg", "sizes": "512x512", "type": "image/svg+xml" }]
 });
 
-// PWA Service Worker (Minimal Cache Strategy)
 const swJS = `
 self.addEventListener('install', (e) => { e.waitUntil(self.skipWaiting()); });
 self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
 self.addEventListener('fetch', (e) => {
-    // Live streaming app, mostly network only, but handle manifest/icon
     const url = new URL(e.request.url);
     if (url.pathname === '/' || url.pathname.endsWith('.js') || url.pathname.endsWith('.json') || url.pathname.endsWith('.svg')) {
         e.respondWith(fetch(e.request));
@@ -289,7 +286,6 @@ self.addEventListener('fetch', (e) => {
 });
 `;
 
-// PWA Icon (Generated SVG)
 const iconSVG = `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
     <rect width="512" height="512" fill="#050507"/>
@@ -564,7 +560,7 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" style="display:none;" autoplay playsinline></audio>
+    <audio id="audioBridge" style="display:none;" playsinline></audio>
 
 <script>
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
@@ -582,7 +578,7 @@ const htmlContent = `
 
         init() {
             window.ws.connect();
-            // Media Session Handling for Background/LockScreen Control
+            // Media Session Handling
             if('mediaSession' in navigator) {
                 navigator.mediaSession.setActionHandler('play', () => this.togAudio());
                 navigator.mediaSession.setActionHandler('pause', () => this.togAudio());
@@ -592,49 +588,54 @@ const htmlContent = `
 
         // Manual Audio Toggle Control with Background Optimization
         togAudio() {
-            const btn = document.getElementById('btnAudio');
-            
-            // 1. Init if not exists
-            if (!audioCtx) {
-                const Ctx = window.AudioContext || window.webkitAudioContext;
-                audioCtx = new Ctx({ latencyHint: 'playback' }); 
+            try {
+                const btn = document.getElementById('btnAudio');
                 
-                // Background keep-alive using MediaStreamDestination -> <audio>
-                const dest = audioCtx.createMediaStreamDestination();
-                const audioEl = document.getElementById('audioBridge');
-                audioEl.srcObject = dest.stream;
-                
-                // Ensure audio element plays to trigger OS background audio mode
-                audioEl.play().catch(e => console.log('Audio Play Blocked', e));
-                
-                window.audioDest = dest;
+                // 1. Init if not exists
+                if (!audioCtx) {
+                    const Ctx = window.AudioContext || window.webkitAudioContext;
+                    // FIX: Removed options object for iOS compatibility
+                    audioCtx = new Ctx(); 
+                    
+                    const dest = audioCtx.createMediaStreamDestination();
+                    const audioEl = document.getElementById('audioBridge');
+                    audioEl.srcObject = dest.stream;
+                    
+                    // Promise chain for robust starting
+                    audioEl.play().catch(e => console.log('Audio Autoplay prevented', e));
+                    
+                    window.audioDest = dest;
 
-                // Silent oscillator to keep AudioContext active even if radio is squelched
-                const osc = audioCtx.createOscillator();
-                const g = audioCtx.createGain();
-                osc.connect(g); 
-                g.connect(dest);
-                osc.frequency.value = 10; // Inaudible low freq
-                g.gain.value = 0.001; // Nearly silence
-                osc.start();
-                
-                this.updateBtnState('running');
-                if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
-                return;
-            }
-
-            // 2. Toggle State
-            if (audioCtx.state === 'running') {
-                audioCtx.suspend().then(() => {
-                    this.updateBtnState('suspended');
-                    if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
-                });
-            } else {
-                audioCtx.resume().then(() => {
+                    // Silent oscillator hack
+                    const osc = audioCtx.createOscillator();
+                    const g = audioCtx.createGain();
+                    osc.connect(g); 
+                    g.connect(dest);
+                    osc.frequency.value = 10;
+                    g.gain.value = 0.001;
+                    osc.start();
+                    
                     this.updateBtnState('running');
-                    document.getElementById('audioBridge').play(); // Re-trigger audio element
                     if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
-                });
+                    return;
+                }
+
+                // 2. Toggle State
+                if (audioCtx.state === 'running') {
+                    audioCtx.suspend().then(() => {
+                        this.updateBtnState('suspended');
+                        if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+                    });
+                } else {
+                    audioCtx.resume().then(() => {
+                        this.updateBtnState('running');
+                        // Re-trigger audio element if needed
+                        document.getElementById('audioBridge').play().catch(e=>{});
+                        if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+                    });
+                }
+            } catch(e) {
+                alert("Audio Init Error: " + e.message);
             }
         },
 
@@ -660,12 +661,15 @@ const htmlContent = `
             this.renderSq(m.squelch);
             
             if('mediaSession' in navigator) {
-                navigator.mediaSession.metadata = new MediaMetadata({
-                    title: (m.freq/1e6).toFixed(3) + ' MHz',
-                    artist: 'SDR Commander',
-                    album: m.mode,
-                    artwork: [{ src: '/icon.svg', sizes: '512x512', type: 'image/svg+xml' }]
-                });
+                // Wrap in try-catch for safety
+                try {
+                    navigator.mediaSession.metadata = new MediaMetadata({
+                        title: (m.freq/1e6).toFixed(3) + ' MHz',
+                        artist: 'SDR Commander',
+                        album: m.mode,
+                        artwork: [{ src: '/icon.svg', sizes: '512x512', type: 'image/svg+xml' }]
+                    });
+                } catch(e){}
             }
         },
         renderSq(v) {
