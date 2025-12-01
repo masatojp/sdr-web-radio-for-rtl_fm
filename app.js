@@ -1,6 +1,6 @@
 /**
- * Modern Web SDR - Final Completed Version
- * Fixes: Android Audio, Distortion, FM Broadcast, Syntax Errors
+ * Modern Web SDR - Manual Audio Control Version with WFM Support
+ * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
  */
 
 require('dotenv').config();
@@ -21,7 +21,7 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    sampleRate: 24000, 
+    sampleRate: 24000, // WFMの場合、rtl_fmは内部でダウンサンプリングを行いますが、出力レートはこの値に合わせられます
     ppm: 0,
     
     // パス設定
@@ -79,7 +79,7 @@ const defaultBookmarks = [
   { "title": "SDJ ATIS", "freq": 126.45, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731847585" },
   { "title": "SDJ TWR", "freq": 118.7, "mode": "AM", "isFolder": false, "parentId": "1763731824815", "id": "1763731881249" },
   { "title": "Sendai FM Radio", "isFolder": true, "parentId": null, "id": "1763731929504" },
-  { "title": "Date FM", "freq": 77.1, "mode": "FM", "isFolder": false, "parentId": "1763731929504", "id": "1763732002721" }
+  { "title": "Date FM", "freq": 77.1, "mode": "WFM", "isFolder": false, "parentId": "1763731929504", "id": "1763732002721" }
 ];
 
 function loadData() {
@@ -128,9 +128,7 @@ class AudioDSP {
             
             // AGC with attenuation capability
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
-            
-            // Target Level 0.4 (Headroom for FM Broadcast)
-            let g = 0.4 / (this.agcPeak + 0.01);
+            let g = 0.5 / (this.agcPeak + 0.01);
             if (g > 20.0) g = 20.0; 
             if (g < 0.1) g = 0.1;
 
@@ -180,28 +178,18 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // 1. Gain Control
     let gainVal = '48'; 
     if (att === 'weak') gainVal = '29';
     if (att === 'mid')  gainVal = '9';
     if (att === 'strong') gainVal = '0';
 
-    // 2. Mode Selection Logic (Auto WBFM for Broadcast)
-    let rtlMode = (mode === 'FM' ? 'fm' : 'am');
-    let useDeemp = false;
-
-    if (mode === 'FM' && freq >= 76000000 && freq <= 108000000) {
-        rtlMode = 'wbfm';
-        useDeemp = true; 
-    }
+    // モード引数の決定
+    let rtlMode = 'am';
+    if (mode === 'FM') rtlMode = 'fm';
+    if (mode === 'WFM') rtlMode = 'wbfm';
 
     const args = ['-M', rtlMode, '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
-    
-    if (useDeemp) {
-        args.push('-E', 'deemp');
-    }
-
-    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${rtlMode}) ATT:${att}(${gainVal})`);
+    console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
     
     rtlProcess = spawn('rtl_fm', args);
     let chunkBuf = Buffer.alloc(0);
@@ -364,13 +352,14 @@ const htmlContent = `
     .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
     @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
 
+    /* New Start/Stop Button */
     .btn-audio-toggle {
         width: 100%; padding: 16px; 
         background: rgba(0,255,200,0.15); border: 1px solid var(--acc); color: var(--acc);
         border-radius: 14px; font-weight: 800; font-size: 1rem; cursor: pointer;
         display: flex; justify-content: center; align-items: center; gap: 10px;
         transition: 0.2s; box-shadow: 0 0 15px rgba(0,255,200,0.1);
-        margin-bottom: 5px;
+        margin-bottom: 5px; /* Spacing above TUNE */
     }
     .btn-audio-toggle.stop {
         background: rgba(255, 59, 48, 0.15); border-color: var(--stop); color: var(--stop);
@@ -467,6 +456,7 @@ const htmlContent = `
             <div style="display:flex; gap:10px; margin-bottom:15px;">
                 <button class="btn" id="modAM" onclick="window.ui.selMod('AM')">AM</button>
                 <button class="btn" id="modFM" onclick="window.ui.selMod('FM')">FM</button>
+                <button class="btn" id="modWFM" onclick="window.ui.selMod('WFM')">WFM</button>
             </div>
             <input type="password" class="inp" id="inpPass" placeholder="Password (required)">
             <div style="display:flex; gap:10px;">
@@ -485,6 +475,7 @@ const htmlContent = `
                 <div style="display:flex; gap:10px; margin-bottom:15px;">
                     <button class="btn" id="addModAM" onclick="window.ui.selAddMod('AM')">AM</button>
                     <button class="btn" id="addModFM" onclick="window.ui.selAddMod('FM')">FM</button>
+                    <button class="btn" id="addModWFM" onclick="window.ui.selAddMod('WFM')">WFM</button>
                 </div>
             </div>
             <div style="display:flex; gap:10px;">
@@ -516,10 +507,12 @@ const htmlContent = `
         togAudio() {
             const btn = document.getElementById('btnAudio');
             
+            // 1. Init if not exists
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new Ctx(); 
                 
+                // Background keep-alive
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
@@ -535,6 +528,7 @@ const htmlContent = `
                 return;
             }
 
+            // 2. Toggle State
             if (audioCtx.state === 'running') {
                 audioCtx.suspend().then(() => this.updateBtnState('suspended'));
             } else {
@@ -562,7 +556,7 @@ const htmlContent = `
             ['off','weak','mid','strong'].forEach(k => { document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':''); });
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
-            if('mediaSession' in navigator) navigator.mediaSession.metadata.title = \`\${(m.freq/1e6).toFixed(3)} MHz (\${m.mode})\`;
+            if('mediaSession' in navigator) navigator.mediaSession.metadata.title = `${(m.freq/1e6).toFixed(3)} MHz (${m.mode})`;
         },
         renderSq(v) {
             this.els.sq.style.left = v + '%'; 
@@ -606,11 +600,13 @@ const htmlContent = `
             this.modalMode = m;
             document.getElementById('modAM').className = 'btn '+(m==='AM'?'active':'');
             document.getElementById('modFM').className = 'btn '+(m==='FM'?'active':'');
+            document.getElementById('modWFM').className = 'btn '+(m==='WFM'?'active':'');
         },
         selAddMod(m) {
             this.addMode = m;
             document.getElementById('addModAM').className = 'btn '+(m==='AM'?'active':'');
             document.getElementById('addModFM').className = 'btn '+(m==='FM'?'active':'');
+            document.getElementById('addModWFM').className = 'btn '+(m==='WFM'?'active':'');
         },
         renderBM(list) {
             const d = list || state.bm;
@@ -623,31 +619,31 @@ const htmlContent = `
             return nodes.map(n => {
                 if(n.isFolder) {
                     const open = state.expanded.has(n.id);
-                    return \`
+                    return `
                         <div>
-                            <div class="row" onclick="window.ui.tog('\${n.id}')">
+                            <div class="row" onclick="window.ui.tog('${n.id}')">
                                 <div class="row-click-area">
-                                    <span class="material-symbols-outlined icon \${open?'rot':''}">chevron_right</span>
-                                    <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
+                                    <span class="material-symbols-outlined icon ${open?'rot':''}">chevron_right</span>
+                                    <span style="font-weight:600; margin-left:10px;">${n.title}</span>
                                 </div>
                                 <div class="act">
-                                    <button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')"><span class="material-symbols-outlined">add</span></button>
-                                    <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                                    <button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '${n.id}')"><span class="material-symbols-outlined">add</span></button>
+                                    <button class="ib" onclick="event.stopPropagation(); window.ws.del('${n.id}')"><span class="material-symbols-outlined">delete</span></button>
                                 </div>
                             </div>
-                            <div class="folder-c \${open?'open':''}">\${this.tree(n.c)}</div>
-                        </div>\`;
+                            <div class="folder-c ${open?'open':''}">${this.tree(n.c)}</div>
+                        </div>`;
                 }
-                return \`
-                    <div class="row" onclick="window.ws.tuneDir(\${n.freq}, '\${n.mode}')">
+                return `
+                    <div class="row" onclick="window.ws.tuneDir(${n.freq}, '${n.mode}')">
                         <div class="row-click-area">
                             <div class="txt">
-                                <span style="font-weight:600;">\${n.title}</span>
-                                <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
+                                <span style="font-weight:600;">${n.title}</span>
+                                <span class="sub">${n.freq.toFixed(3)} MHz ${n.mode}</span>
                             </div>
                         </div>
-                        <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
-                    </div>\`;
+                        <button class="ib" onclick="event.stopPropagation(); window.ws.del('${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                    </div>`;
             }).join('');
         },
         tog(id) {
@@ -655,19 +651,113 @@ const htmlContent = `
             this.renderBM();
         },
         renderRec(list) {
-            document.getElementById('listRec').innerHTML = list.map(f => \`
+            document.getElementById('listRec').innerHTML = list.map(f => `
                 <div class="row">
                     <div class="row-click-area">
                         <div class="txt">
-                            <span style="font-weight:600;">\${f.name.split('_')[2]||f.name}</span>
-                            <span class="sub">\${(f.size/1024/1024).toFixed(2)} MB</span>
+                            <span style="font-weight:600;">${f.name.split('_')[2]||f.name}</span>
+                            <span class="sub">${(f.size/1024/1024).toFixed(2)} MB</span>
                         </div>
                     </div>
                     <div class="act">
-                        <a href="/download/\${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
-                        <button class="ib" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
+                        <a href="/download/${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
+                        <button class="ib" onclick="window.ws.delRec('${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
-                </div>\`).join('');
+                </div>`).join('');
+        }
+    };
+
+    window.ws = {
+        c: null,
+        connect() {
+            this.c = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host);
+            this.c.binaryType = 'arraybuffer';
+            this.c.onmessage = e => {
+                if(typeof e.data === 'string') {
+                    const m = JSON.parse(e.data);
+                    if(m.type==='status_update') window.ui.upd(m);
+                    else if(m.type==='bookmarks') { state.bm = m.data; window.ui.renderBM(); }
+                    else if(m.type==='recordings') window.ui.renderRec(m.data);
+                    else if(m.type==='error') alert(m.msg);
+                } else this.audio(e.data);
+            };
+            this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
+        },
+        send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
+        sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
+        setMode(m) { state.mode=m; this.tune(true); },
+        setAtt(a) { this.send({type:'set_att', att:a}); },
+        togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
+        tune(skip=false) {
+            let f = state.freq;
+            const m = window.ui.modalMode; 
+            if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
+            const p = document.getElementById('inpPass').value;
+            this.send({type:'auth_tune', password:p, freq:f, mode:m});
+            window.ui.closeModal();
+        },
+        tuneDir(f, m) {
+            const p = document.getElementById('inpPass').value;
+            if (!p) {
+                state.freq = Math.floor(f*1e6);
+                state.mode = m;
+                document.getElementById('inpFreq').value = f.toFixed(3);
+                window.ui.selMod(m);
+                window.ui.modal('tune');
+                return;
+            }
+            this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
+            state.mode = m;
+        },
+        saveBookmark() {
+            const title = document.getElementById('addName').value;
+            if (!title) return;
+            const isFolder = (window.ui.addType === 'folder');
+            const data = { title, isFolder, parentId: window.ui.targetParent };
+            if (!isFolder) {
+                const freqVal = parseFloat(document.getElementById('addFreq').value);
+                if (!freqVal) return;
+                data.freq = freqVal;
+                data.mode = window.ui.addMode;
+            }
+            this.send({type:'add_bookmark', data});
+            window.ui.closeModal();
+        },
+        del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
+        delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
+        
+        audio(b) {
+            // If audio is not manually started, ignore packets to save CPU/battery
+            if(!audioCtx || audioCtx.state !== 'running') return;
+
+            const dv = new DataView(b);
+            const rssi = dv.getInt16(0, true);
+            const sqlOpen = dv.getInt16(2, true);
+            
+            const bar = window.ui.els.rssi;
+            bar.style.width = Math.min(100, (rssi/200)*100)+'%';
+            if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
+            const bdgSql = document.getElementById('bdgSql');
+            if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
+            else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
+
+            const f = new Float32Array((b.byteLength - 4) / 2);
+            const s16 = new Int16Array(b, 4);
+            for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
+
+            const buf = audioCtx.createBuffer(1, f.length, 24000);
+            buf.getChannelData(0).set(f);
+
+            const now = audioCtx.currentTime;
+            if (nextStartTime < now) nextStartTime = now;
+
+            const s = audioCtx.createBufferSource();
+            s.buffer = buf;
+            if (window.audioDest) s.connect(window.audioDest);
+            else s.connect(audioCtx.destination);
+            
+            s.start(nextStartTime);
+            nextStartTime += buf.duration;
         }
     };
 
@@ -675,4 +765,4 @@ const htmlContent = `
 </script>
 </body>
 </html>
-`; // END
+`;
