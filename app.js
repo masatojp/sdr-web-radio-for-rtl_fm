@@ -1,6 +1,6 @@
 /**
- * Modern Web SDR - Android/iOS Universal Fix
- * Core: rtl_fm -> Node.js -> Modern UI
+ * Modern Web SDR - Universal Audio Fix
+ * Core: rtl_fm -> Node.js -> Robust Audio Scheduling
  */
 
 require('dotenv').config();
@@ -21,7 +21,7 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    sampleRate: 24000,
+    sampleRate: 24000, // rtl_fmの出力レート
     ppm: 0,
     
     // パス設定
@@ -114,17 +114,18 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            // HPF
+            // HPF (DC除去)
             let raw = s; s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; this.lastIn = raw; this.lastOut = s;
             sumSq += s * s;
             
-            // AGC
+            // Simple AGC
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.6 / (this.agcPeak + 0.05);
             if (g > 15.0) g = 15.0; if (g < 1.0) g = 1.0;
             this.agcGain = this.agcGain * 0.99 + g * 0.01;
             
             let p = s * this.agcGain * this.squelchGate;
+            // Limiter
             if (p > 0.98) p = 0.98; if (p < -0.98) p = -0.98;
             out.writeInt16LE(Math.floor(p * 32767), i * 2);
         }
@@ -132,7 +133,7 @@ class AudioDSP {
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.8 + rms * 0.2;
 
-        // Instant Squelch Logic
+        // Instant Squelch Logic with Hysteresis
         const open = Math.max(0.005, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -163,22 +164,38 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
-    // Attenuator Logic (Gain Control)
+    // Gain Control
     let gainVal = '48'; // OFF = Max
     if (att === 'weak') gainVal = '35';   // WEAK
     if (att === 'mid')  gainVal = '10';   // MID
     if (att === 'strong') gainVal = '0';  // STRONG
 
+    // -s 24000: 出力レート
     const args = ['-M', (mode === 'FM' ? 'fm' : 'am'), '-f', freq.toString(), '-s', CONFIG.sampleRate.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
     console.log(`[Radio] Tune: ${(freq/1e6).toFixed(3)} MHz (${mode}) ATT:${att}(${gainVal})`);
     
     rtlProcess = spawn('rtl_fm', args);
-    rtlProcess.stdout.on('data', (c) => handleAudio(c));
+    
+    // Buffer for chunking
+    let chunkBuf = Buffer.alloc(0);
+    const CHUNK_SIZE = 4096; // Adjust based on latency vs CPU
+
+    rtlProcess.stdout.on('data', (c) => {
+        chunkBuf = Buffer.concat([chunkBuf, c]);
+        while (chunkBuf.length >= CHUNK_SIZE) {
+            const chunk = chunkBuf.subarray(0, CHUNK_SIZE);
+            chunkBuf = chunkBuf.subarray(CHUNK_SIZE);
+            handleAudio(chunk);
+        }
+    });
+
     setTimeout(() => broadcastStatus(), 500);
 }
 
 function handleAudio(raw) {
     const res = dsp.process(raw, { squelchThreshold });
+    
+    // Protocol: [RSSI(2bytes)][SquelchStatus(2bytes)][PCM Data...]
     const head = new Int16Array(1); head[0] = res.rssi;
     const statusWord = res.isOpen ? 1 : 0; 
     const combo = Buffer.alloc(raw.length + 4); 
@@ -187,7 +204,10 @@ function handleAudio(raw) {
     res.buffer.copy(combo, 4);
 
     wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(combo); });
-    if (isRecording && recordingStream && res.isOpen) recordingStream.write(res.buffer);
+    
+    if (isRecording && recordingStream && res.isOpen) {
+        recordingStream.write(res.buffer);
+    }
 }
 
 function startRec() {
@@ -358,9 +378,22 @@ const htmlContent = `
     @keyframes up { from{transform:translateY(100%)}to{transform:translateY(0)} }
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
+
+    /* Android用ロック解除ボタン (普段は隠す) */
+    .audio-unlock-btn {
+        position: fixed; bottom: 20px; right: 20px;
+        background: #ff3b30; color: #fff;
+        padding: 15px 30px; border-radius: 50px;
+        font-weight: bold; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        z-index: 9999; display: none; cursor: pointer;
+        animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%{transform:scale(1);} 50%{transform:scale(1.05);} 100%{transform:scale(1);} }
 </style>
 </head>
 <body>
+    <div class="audio-unlock-btn" id="unlockBtn" onclick="window.ui.forceUnlock()">TAP TO UNMUTE 🔇</div>
+
     <div class="app">
         <div class="panel">
             <div class="badges">
@@ -448,11 +481,12 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" style="display:none;" playsinline autoplay></audio>
+    <audio id="audioBridge" style="display:none;" playsinline></audio>
 
 <script>
-    let audioCtx, wsConn;
+    let audioCtx;
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10 };
+    let nextStartTime = 0; // Seamless audio scheduling pointer
 
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
@@ -461,51 +495,54 @@ const htmlContent = `
         targetParent: null,
         addType: 'freq',
 
-        // --- ANDROID FIX VERSION ---
         init() {
-            // Android Chrome Strict Autoplay Policy Unlocker
-            const unlock = () => {
-                // 1. Initialize AudioContext WITHOUT forced sampleRate. 
-                // Android prefers native hardware rate (48000/44100).
+            // Android対策: 任意のタッチイベントでAudioContext作成を試みる
+            const initAudio = () => {
                 if(!audioCtx) {
+                    // 重要: sampleRateを指定しない (OSデフォルトを使う)
                     const Ctx = window.AudioContext || window.webkitAudioContext;
-                    audioCtx = new Ctx(); 
+                    audioCtx = new Ctx();
                     
-                    // 2. Setup Background Audio Bridge
+                    // iOS/Androidバックグラウンド再生対策
                     const dest = audioCtx.createMediaStreamDestination();
                     const audioEl = document.getElementById('audioBridge');
                     audioEl.srcObject = dest.stream;
-                    // Force play inside the event handler
-                    audioEl.play().catch(e => console.log("Bg audio init pending..."));
+                    audioEl.play().catch(e=>console.log("Auto-play blocked"));
                     window.audioDest = dest;
 
-                    // 3. Keep-alive oscillator (Silent)
+                    // 無音オシレーターでコンテキストを維持
                     const osc = audioCtx.createOscillator();
                     const g = audioCtx.createGain();
                     osc.connect(g); g.connect(dest);
                     osc.frequency.value=10; g.gain.value=0.001; osc.start();
-
-                    if('mediaSession' in navigator) {
-                        navigator.mediaSession.metadata = new MediaMetadata({title:'SDR Monitor', artist:'Receiving'});
-                        navigator.mediaSession.setActionHandler('play', ()=>{ audioCtx.resume(); audioEl.play(); });
-                    }
                 }
                 
-                // 4. Aggressive Resume for Android
-                if(audioCtx.state === 'suspended') {
-                    audioCtx.resume().then(() => {
-                        console.log("Audio Context Resumed!");
-                    });
+                // サスペンド状態なら再開を試みる
+                if(audioCtx && audioCtx.state === 'suspended') {
+                    audioCtx.resume();
                 }
-            };
-            
-            // Bind to ALL interaction types to catch the first user gesture
-            ['click','touchstart','touchend','keydown'].forEach(e => {
-                document.body.addEventListener(e, unlock, {once:false, capture:true});
-            });
 
-            // Connect WS immediately
+                // 状態監視: 失敗し続けているならボタンを出す
+                setTimeout(() => {
+                    if(!audioCtx || audioCtx.state === 'suspended') {
+                        document.getElementById('unlockBtn').style.display = 'block';
+                    } else {
+                        document.getElementById('unlockBtn').style.display = 'none';
+                    }
+                }, 500);
+            };
+
+            // 全てのユーザーアクションで初期化を試みる
+            ['click','touchstart','keydown'].forEach(e => document.body.addEventListener(e, initAudio, {once:false, capture:true}));
+            
             window.ws.connect();
+        },
+
+        forceUnlock() {
+            // 明示的なボタンタップ時は強引にResume
+            if(audioCtx) audioCtx.resume();
+            document.getElementById('audioBridge').play();
+            document.getElementById('unlockBtn').style.display = 'none';
         },
 
         upd(m) {
@@ -684,49 +721,49 @@ const htmlContent = `
         },
         del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
         delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
+        
         audio(b) {
-            if(!audioCtx) return; 
-            // Aggressive resume attempt on incoming audio
-            if(audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
+            if(!audioCtx) return;
 
             const dv = new DataView(b);
             const rssi = dv.getInt16(0, true);
             const sqlOpen = dv.getInt16(2, true);
             
+            // UI更新
             const bar = window.ui.els.rssi;
             bar.style.width = Math.min(100, (rssi/200)*100)+'%';
             if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
-
             const bdgSql = document.getElementById('bdgSql');
             if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
             else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
 
+            // 音声デコード (Int16 -> Float32)
             const f = new Float32Array((b.byteLength - 4) / 2);
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
-            
-            // Tell the browser: "This buffer is 24000Hz". 
-            // The browser will resample it to the hardware rate (48000Hz) automatically.
+
+            // バッファ作成 (Source Rate = 24000)
             const buf = audioCtx.createBuffer(1, f.length, 24000);
             buf.getChannelData(0).set(f);
-            
-            const s = audioCtx.createBufferSource(); 
-            s.buffer = buf; 
-            
+
+            // スケジューリング (ここがブツブツ音対策の要)
+            const now = audioCtx.currentTime;
+
+            // もし「次の開始予定時間」が過去になっていたら（通信遅延など）、
+            // 「現在時刻」にリセットして遅れを取り戻す
+            if (nextStartTime < now) {
+                nextStartTime = now;
+            }
+
+            const s = audioCtx.createBufferSource();
+            s.buffer = buf;
             if (window.audioDest) s.connect(window.audioDest);
             else s.connect(audioCtx.destination);
-
-            const now = audioCtx.currentTime;
-            let next = (window.nextTime || 0);
             
-            // [Android Timing Fix]
-            // If the next schedule is in the past (lag), reset it to now.
-            if(next < now) next = now;
-            // Add a small safety buffer for jittery Android timers
-            next += 0.02; 
-
-            s.start(next); 
-            window.nextTime = next + buf.duration;
+            s.start(nextStartTime);
+            
+            // 次のパケットの開始位置を今回の終了位置にセット (隙間を作らない)
+            nextStartTime += buf.duration;
         }
     };
 
