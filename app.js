@@ -1,6 +1,6 @@
 /**
- * Modern Web SDR - Edit Mode Implementation
- * Features: WFM Support, Safe Edit Mode, Bookmark Reordering, Centered Modals
+ * Modern Web SDR - Nested Folders Update
+ * Features: WFM Support, Safe Edit Mode, Bookmark Reordering, Centered Modals, Nested Folders
  */
 
 require('dotenv').config();
@@ -692,11 +692,15 @@ const htmlContent = `
                         \${!isLast ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>\` : ''}
                     \`;
                     
-                    const addSubBtn = n.isFolder ? \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')"><span class="material-symbols-outlined">add</span></button>\` : '';
+                    let addSubBtns = '';
+                    if (n.isFolder) {
+                        addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')" title="Add Channel"><span class="material-symbols-outlined">add</span></button>\`;
+                        addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_folder', '\${n.id}')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>\`;
+                    }
                     
                     acts = \`
                         \${moveBtns}
-                        \${addSubBtn}
+                        \${addSubBtns}
                         <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
                         <button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
                     \`;
