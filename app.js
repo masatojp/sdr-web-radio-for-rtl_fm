@@ -1,6 +1,6 @@
 /**
  * Modern Web SDR - Edit Mode Implementation
- * Features: WFM Support, Safe Edit Mode, Bookmark Reordering
+ * Features: WFM Support, Safe Edit Mode, Bookmark Reordering, Centered Modals
  */
 
 require('dotenv').config();
@@ -418,9 +418,11 @@ const htmlContent = `
     .ib-move { color: var(--warn); }
     .ib-del { color: var(--stop); }
 
-    .ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); backdrop-filter:blur(8px); display:none; justify-content:center; align-items:flex-end; z-index: 1000; }
-    .card { background: #1a1b20; width:100%; max-width:480px; padding:30px; border-radius:24px 24px 0 0; box-shadow: 0 -10px 40px #000; animation: up 0.3s; }
-    @keyframes up { from{transform:translateY(100%)}to{transform:translateY(0)} }
+    /* Modal Centering */
+    .ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); backdrop-filter:blur(8px); display:none; justify-content:center; align-items:center; z-index: 1000; }
+    .card { background: #1a1b20; width:90%; max-width:400px; padding:30px; border-radius:24px; box-shadow: 0 10px 40px #000; animation: pop 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+    @keyframes pop { from{transform:scale(0.9); opacity:0} to{transform:scale(1); opacity:1} }
+    
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
 </style>
