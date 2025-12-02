@@ -1,7 +1,10 @@
 /**
- * Modern Web SDR - Move Items Update + Background Playback Fix v2
- * Features: WFM Support, Safe Edit Mode, Bookmark Reordering, Nested Folders, Move Items
- * Enhanced: Media Session API Support, Robust Initialization
+ * Modern Web SDR - Full Version (v2.1)
+ * Features:
+ * - WFM/AM/FM Support with DSP (AGC, Squelch)
+ * - Recursive Folder Bookmarks (Move, Edit, Reorder)
+ * - Background Recording
+ * - Media Session API (Lock Screen Control & Metadata)
  */
 
 require('dotenv').config();
@@ -13,7 +16,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 // ==========================================
-// 設定 (Configuration)
+// 1. 設定 (Configuration)
 // ==========================================
 const CONFIG = {
     webPort: 3000,
@@ -34,7 +37,7 @@ const CONFIG = {
 if (!fs.existsSync(CONFIG.recordingsPath)) fs.mkdirSync(CONFIG.recordingsPath);
 
 // ==========================================
-// Discord Notification
+// 2. Discord Notification
 // ==========================================
 function sendDiscordNotification() {
     const rawUrl = process.env.DISCORD_WEBHOOK_URL || "";
@@ -70,7 +73,7 @@ function sendDiscordNotification() {
 }
 
 // ==========================================
-// データ管理
+// 3. データ管理 (Data Management)
 // ==========================================
 let bookmarks = [];
 let squelchDB = {};
@@ -97,7 +100,7 @@ function saveData() {
 loadData();
 
 // ==========================================
-// DSP (Audio Processing)
+// 4. DSP (Audio Processing)
 // ==========================================
 class AudioDSP {
     constructor() { this.reset(); }
@@ -121,11 +124,13 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
+            // DC Offset Removal (High Pass)
             let raw = s; 
             s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; 
             this.lastIn = raw; 
             this.lastOut = s;
             
+            // AGC
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.5 / (this.agcPeak + 0.01);
             if (g > 20.0) g = 20.0; 
@@ -134,6 +139,7 @@ class AudioDSP {
             this.agcGain = this.agcGain * 0.995 + g * 0.005;
             let p = s * this.agcGain * this.squelchGate;
 
+            // Soft Limiter
             if (p > 0.95 || p < -0.95) p = this.softClip(p);
             if (p > 0.99) p = 0.99; 
             if (p < -0.99) p = -0.99;
@@ -145,6 +151,7 @@ class AudioDSP {
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.9 + rms * 0.1;
 
+        // Hysteresis Squelch
         const open = Math.max(0.002, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -160,7 +167,7 @@ class AudioDSP {
 const dsp = new AudioDSP();
 
 // ==========================================
-// RTL-SDR Backend
+// 5. RTL-SDR Backend
 // ==========================================
 let rtlProcess = null;
 let currentFreq = CONFIG.initialFreq;
@@ -175,6 +182,7 @@ function startRadio(freq, mode, att) {
     if (rtlProcess) { rtlProcess.kill(); rtlProcess = null; }
     currentFreq = freq; currentMode = mode; currentAtt = att; dsp.reset();
     
+    // Gain Mapping
     let gainVal = '48'; 
     if (att === 'weak') gainVal = '29';
     if (att === 'mid')  gainVal = '9';
@@ -203,20 +211,27 @@ function startRadio(freq, mode, att) {
             handleAudio(chunk);
         }
     });
+    // Restore squelch memory if exists
+    if (squelchDB[freq]) squelchThreshold = squelchDB[freq];
+    
     setTimeout(() => broadcastStatus(), 500);
 }
 
 function handleAudio(raw) {
     const res = dsp.process(raw, { squelchThreshold });
-    const head = new Int16Array(1); head[0] = res.rssi;
-    const statusWord = res.isOpen ? 1 : 0; 
+    
+    // Combine Metadata + Audio
+    // [0-1]: RSSI (int16), [2-3]: SquelchStatus (int16, 1=Open, 0=Closed), [4...]: Audio
     const combo = Buffer.alloc(raw.length + 4); 
     combo.writeInt16LE(res.rssi, 0);
-    combo.writeInt16LE(statusWord, 2);
+    combo.writeInt16LE(res.isOpen ? 1 : 0, 2);
     res.buffer.copy(combo, 4);
 
     wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(combo); });
-    if (isRecording && recordingStream && res.isOpen) recordingStream.write(res.buffer);
+    
+    if (isRecording && recordingStream && res.isOpen) {
+        recordingStream.write(res.buffer);
+    }
 }
 
 function startRec() {
@@ -260,7 +275,7 @@ function writeWavHeader(s, r, l) {
 }
 
 // ==========================================
-// Server
+// 6. Server & WebSocket
 // ==========================================
 const server = http.createServer((req, res) => {
     const u = new URL(req.url, `http://${req.headers.host}`);
@@ -302,8 +317,8 @@ wss.on('connection', ws => {
                 if (idx !== -1) {
                     bookmarks[idx].title = c.data.title;
                     if (!bookmarks[idx].isFolder) {
-                         bookmarks[idx].freq = c.data.freq;
-                         bookmarks[idx].mode = c.data.mode;
+                          bookmarks[idx].freq = c.data.freq;
+                          bookmarks[idx].mode = c.data.mode;
                     }
                     saveData();
                     ws.send(JSON.stringify({type:'bookmarks', data:bookmarks}));
@@ -350,7 +365,7 @@ server.listen(CONFIG.webPort, () => {
 });
 
 // ==========================================
-// Frontend
+// 7. Frontend Code (HTML/CSS/JS)
 // ==========================================
 const htmlContent = `
 <!DOCTYPE html>
@@ -499,14 +514,12 @@ const htmlContent = `
             </div>
         </div>
         
-        <!-- List Container with dynamic class for Edit Mode -->
         <div class="panel" id="listBM" style="padding:10px;"></div>
 
         <div class="section-header"><span class="section-title">RECORDINGS</span></div>
         <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
-    <!-- Modals -->
     <div class="ovl" id="modalTune">
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
@@ -553,7 +566,6 @@ const htmlContent = `
         </div>
     </div>
 
-    <!-- Hidden Audio for Background Persistence -->
     <audio id="audioBridge" autoplay playsinline loop style="display:none;"></audio>
 
 <script>
@@ -561,7 +573,7 @@ const htmlContent = `
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null };
     let nextStartTime = 0; 
 
-    // --- 1. WebSocket Definition (Defined FIRST) ---
+    // --- 1. WebSocket Definition ---
     window.ws = {
         c: null,
         connect() {
@@ -674,7 +686,7 @@ const htmlContent = `
         }
     };
 
-    // --- 2. UI Definition (Defined SECOND) ---
+    // --- 2. UI Definition (Enhanced Media Session) ---
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
         modalMode: 'AM',
@@ -683,69 +695,83 @@ const htmlContent = `
         addType: 'freq',
 
         init() {
-            // Check if window.ws exists before connecting
             if (window.ws) {
                 window.ws.connect();
             } else {
                 console.error("WebSocket controller not initialized!");
             }
             
-            // Setup Media Session handlers initially
+            // --- Media Session Action Handlers ---
             if ('mediaSession' in navigator) {
-                 navigator.mediaSession.setActionHandler('play', () => this.togAudio());
-                 navigator.mediaSession.setActionHandler('pause', () => this.togAudio());
-                 navigator.mediaSession.setActionHandler('stop', () => this.togAudio());
+                const ms = navigator.mediaSession;
+                
+                // 再生・停止
+                ms.setActionHandler('play', () => this.togAudio());
+                ms.setActionHandler('pause', () => this.togAudio());
+                ms.setActionHandler('stop', () => this.togAudio());
+
+                // ロック画面の「前の曲」「次の曲」ボタンで周波数微調整 (+/- 100kHz)
+                ms.setActionHandler('previoustrack', () => {
+                    const newFreq = state.freq - 100000; // -0.1 MHz
+                    window.ws.tuneDir(newFreq / 1e6, state.mode);
+                });
+                ms.setActionHandler('nexttrack', () => {
+                    const newFreq = state.freq + 100000; // +0.1 MHz
+                    window.ws.tuneDir(newFreq / 1e6, state.mode);
+                });
+
+                // シークバー操作（オプション：現在は無効化）
+                ms.setActionHandler('seekto', (details) => {});
             }
         },
 
         togAudio() {
             const btn = document.getElementById('btnAudio');
             
-            // First time setup or resume
+            // 初回起動または再開
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
-                audioCtx = new Ctx(); 
+                audioCtx = new Ctx({ latencyHint: 'interactive' }); 
                 
-                // Connect bridge to audio tag to keep background alive
+                // --- Background Audio Keeper (Silent Oscillator) ---
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
                 
-                // Force play for mobile browsers (user interaction required)
-                audioEl.play().catch(e => console.log("Auto-play blocked", e));
+                // ユーザーインタラクション必須の再生トリガー
+                audioEl.play().then(() => {
+                    console.log("[Audio] Bridge started for background persistence");
+                }).catch(e => console.warn("[Audio] Autoplay blocked", e));
                 
-                window.audioDest = dest;
+                window.audioDest = dest; // WebSocket音声の出力先
                 
-                // Start silent oscillator to keep pipeline active
+                // 無音のオシレーターを流し続ける（パイプラインを生かし続けるため）
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
-                osc.connect(g); g.connect(dest);
-                osc.frequency.value = 10; g.gain.value = 0.001; osc.start();
+                osc.connect(g); 
+                g.connect(dest); // ストリームへ
+                g.connect(audioCtx.destination); // 物理スピーカーへ（iOS対策）
                 
-                // *** ALSO Connect to main destination for sound! ***
-                // Note: The websocket audio data is routed to window.audioDest (which is the loopback stream)
-                // We typically need to route it to speakers too if we want to hear it, 
-                // BUT here we rely on the <audio> element playing the stream to hear it.
-                // However, some browsers mute streams unless connected to destination.
-                // Let's connect the gain to destination as well just in case.
-                g.connect(audioCtx.destination);
-
+                osc.frequency.value = 20; // 可聴域下限付近
+                g.gain.value = 0.001;     // ほぼ無音
+                osc.start();
+                
                 this.updateBtnState('running');
-                this.updateMediaSessionState('playing');
+                this.updateMediaMetadata(); // メタデータ即時更新
                 return;
             }
 
             if (audioCtx.state === 'running') {
                 audioCtx.suspend().then(() => {
                     this.updateBtnState('suspended');
-                    this.updateMediaSessionState('paused');
                     document.getElementById('audioBridge').pause();
+                    if('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
                 });
             } else {
                 audioCtx.resume().then(() => {
                     this.updateBtnState('running');
-                    this.updateMediaSessionState('playing');
-                    document.getElementById('audioBridge').play().catch(e=>{});
+                    document.getElementById('audioBridge').play().catch(()=>{});
+                    this.updateMediaMetadata();
                 });
             }
         },
@@ -761,26 +787,28 @@ const htmlContent = `
             }
         },
         
-        updateMediaSessionState(stateStr) {
-            if (!('mediaSession' in navigator)) return;
-            navigator.mediaSession.playbackState = stateStr;
+        // --- Dynamic Metadata Update ---
+        updateMediaMetadata() {
+            if (!('mediaSession' in navigator) || !audioCtx || audioCtx.state !== 'running') return;
             
-            const title = \`🔴 LIVE: \${(state.freq/1e6).toFixed(3)} MHz\`;
-            const artist = \`SDR Commander [\${state.mode}]\`;
+            navigator.mediaSession.playbackState = 'playing';
+            
+            const titleStr = \`\${(state.freq/1e6).toFixed(3)} MHz\`;
+            const artistStr = \`\${state.mode} | SQL: \${state.squelch} | \${state.rec ? '● REC' : 'LIVE'}\`;
             
             navigator.mediaSession.metadata = new MediaMetadata({
-                title: title,
-                artist: artist,
-                album: 'SDR Web Receiver',
+                title: titleStr,
+                artist: artistStr,
+                album: 'SDR Commander',
                 artwork: [
-                    { src: 'https://placehold.co/512x512/1a1b20/00ffc8?text=SDR+RADIO', sizes: '512x512', type: 'image/png' },
-                    { src: 'https://placehold.co/192x192/1a1b20/00ffc8?text=SDR', sizes: '192x192', type: 'image/png' }
+                    { src: 'https://placehold.co/512x512/111/00ffc8?text=SDR', sizes: '512x512', type: 'image/png' },
+                    { src: 'https://placehold.co/192x192/111/00ffc8?text='+state.mode, sizes: '192x192', type: 'image/png' }
                 ]
             });
             
             try {
                 navigator.mediaSession.setPositionState({
-                    duration: 3600, 
+                    duration: Infinity,
                     playbackRate: 1.0,
                     position: 0
                 });
@@ -788,7 +816,12 @@ const htmlContent = `
         },
 
         upd(m) {
+            // ステータス更新を受け取ったら状態を更新
+            const prevFreq = state.freq;
+            const prevRec = state.rec;
+
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
+            
             this.els.freq.innerText = (m.freq/1e6).toFixed(3);
             document.getElementById('bdgMode').innerText = m.mode;
             document.getElementById('bdgAtt').style.display = m.att!=='off'?'inline-block':'none';
@@ -797,12 +830,14 @@ const htmlContent = `
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
             
-            if(audioCtx && audioCtx.state === 'running') {
-                this.updateMediaSessionState('playing');
+            // 周波数や録音状態が変わったら通知バーの表示も更新
+            if (prevFreq !== m.freq || prevRec !== m.isRecording) {
+                this.updateMediaMetadata();
             }
         },
+        
         renderSq(v) { this.els.sq.style.left = v + '%'; this.els.valSq.innerText = v; },
-        adjSq(delta) { let n = state.squelch + delta; if (n < 0) n = 0; if (n > 100) n = 100; state.squelch = n; this.renderSq(n); window.ws.sendSq(n); },
+        adjSq(delta) { let n = state.squelch + delta; if (n < 0) n = 0; if (n > 100) n = 100; state.squelch = n; this.renderSq(n); window.ws.sendSq(n); this.updateMediaMetadata(); },
         
         togEdit() {
             state.editMode = !state.editMode;
@@ -994,7 +1029,6 @@ const htmlContent = `
     };
 
     // --- 3. Initialize ---
-    // Ensure DOM is ready, though usually fine at end of body.
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => window.ui.init());
     } else {
