@@ -1,7 +1,6 @@
 /**
- * Modern Web SDR - Manual Audio Control Version
- * Features: WFM Support (High Quality), Bookmark Editing, Reordering
- * Core: rtl_fm -> Node.js -> Explicit Start/Stop UI
+ * Modern Web SDR - Edit Mode Implementation
+ * Features: WFM Support, Safe Edit Mode, Bookmark Reordering
  */
 
 require('dotenv').config();
@@ -22,7 +21,6 @@ const CONFIG = {
     // SDR初期設定
     initialFreq: 126450000, 
     initialMode: 'AM',
-    // 【改善】ピー音対策：48kHzに上げることで19kHzのパイロット信号の折り返しノイズを防ぐ
     sampleRate: 48000, 
     ppm: 0,
     
@@ -122,13 +120,11 @@ class AudioDSP {
 
         for (let i = 0; i < len; i++) {
             let s = inputBuffer.readInt16LE(i * 2) / 32768.0;
-            // HPF
             let raw = s; 
             s = raw - 0.95 * this.lastIn + 0.95 * this.lastOut; 
             this.lastIn = raw; 
             this.lastOut = s;
             
-            // AGC
             this.agcPeak = this.agcPeak * 0.999 + Math.abs(s) * 0.001;
             let g = 0.5 / (this.agcPeak + 0.01);
             if (g > 20.0) g = 20.0; 
@@ -137,7 +133,6 @@ class AudioDSP {
             this.agcGain = this.agcGain * 0.995 + g * 0.005;
             let p = s * this.agcGain * this.squelchGate;
 
-            // Soft Limiter
             if (p > 0.95 || p < -0.95) p = this.softClip(p);
             if (p > 0.99) p = 0.99; 
             if (p < -0.99) p = -0.99;
@@ -149,7 +144,6 @@ class AudioDSP {
         const rms = Math.sqrt(sumSq / len);
         this.rms = this.rms * 0.9 + rms * 0.1;
 
-        // Squelch Hysteresis
         const open = Math.max(0.002, sqThresh); 
         const close = open * 0.8; 
         if (this.rms > open) this.squelchGate = 1.0;
@@ -188,8 +182,6 @@ function startRadio(freq, mode, att) {
     let args = ['-f', freq.toString(), '-g', gainVal, '-p', CONFIG.ppm.toString(), '-F', '9'];
 
     if (mode === 'WFM') {
-        // 【改善】240k入力 -> 48k出力 (5倍ダウンサンプリング)
-        // 整数倍での変換により計算誤差ノイズを低減し、帯域も確保
         args.push('-M', 'wbfm', '-s', '240000', '-r', CONFIG.sampleRate.toString());
     } else {
         let rtlMode = (mode === 'FM') ? 'fm' : 'am';
@@ -359,7 +351,7 @@ const htmlContent = `
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
 <style>
-    :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; }
+    :root { --bg: #050507; --panel: rgba(30, 30, 35, 0.7); --acc: #00ffc8; --acc-dim: rgba(0,255,200,0.15); --txt: #fff; --sub: #8b9bb4; --mute: #4a4a4a; --open: #00e676; --stop: #ff3b30; --warn: #ffcc00; }
     body { background: var(--bg); color: var(--txt); font-family: 'Inter', sans-serif; margin: 0; display: flex; justify-content: center; min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
     .app { width: 100%; max-width: 480px; padding: 20px 20px 100px; box-sizing: border-box; }
     .panel { background: var(--panel); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); padding: 20px; margin-bottom: 16px; }
@@ -390,25 +382,26 @@ const htmlContent = `
     .rec.on { background: #ff3b30; color: #fff; border-color: #ff3b30; animation: p 2s infinite; }
     @keyframes p { 0% {opacity:1} 50% {opacity:0.7} 100% {opacity:1} }
 
-    .btn-audio-toggle {
-        width: 100%; padding: 16px; 
-        background: rgba(0,255,200,0.15); border: 1px solid var(--acc); color: var(--acc);
-        border-radius: 14px; font-weight: 800; font-size: 1rem; cursor: pointer;
-        display: flex; justify-content: center; align-items: center; gap: 10px;
-        transition: 0.2s; box-shadow: 0 0 15px rgba(0,255,200,0.1);
-        margin-bottom: 5px;
-    }
-    .btn-audio-toggle.stop {
-        background: rgba(255, 59, 48, 0.15); border-color: var(--stop); color: var(--stop);
-        box-shadow: 0 0 15px rgba(255, 59, 48, 0.1);
-    }
+    .btn-audio-toggle { width: 100%; padding: 16px; background: rgba(0,255,200,0.15); border: 1px solid var(--acc); color: var(--acc); border-radius: 14px; font-weight: 800; font-size: 1rem; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 10px; transition: 0.2s; box-shadow: 0 0 15px rgba(0,255,200,0.1); margin-bottom: 5px; }
+    .btn-audio-toggle.stop { background: rgba(255, 59, 48, 0.15); border-color: var(--stop); color: var(--stop); box-shadow: 0 0 15px rgba(255, 59, 48, 0.1); }
     .btn-audio-toggle:active { transform: scale(0.98); }
 
     .section-header { display: flex; justify-content: space-between; align-items: center; margin: 24px 4px 8px 4px; }
     .section-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; color: var(--sub); }
-    .btn-add { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; cursor: pointer; margin-left: 8px; }
+    
+    .btn-edit-toggle { background: transparent; border: 1px solid var(--sub); color: var(--sub); padding: 4px 12px; border-radius: 6px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; }
+    .btn-edit-toggle.editing { background: var(--warn); color: #000; border-color: var(--warn); font-weight: bold; }
+    
+    .edit-controls { display: none; gap: 8px; }
+    .edit-controls.show { display: flex; }
+    .btn-add { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; cursor: pointer; }
 
     .tree { display: flex; flex-direction: column; gap: 2px; }
+    
+    /* Edit Mode Styles */
+    .panel.edit-mode { border-color: var(--warn); background: rgba(255, 204, 0, 0.05); }
+    .panel.edit-mode .row { cursor: default; }
+
     .row { display: flex; align-items: center; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; cursor: pointer; justify-content: space-between; transition: background 0.1s; }
     .row:hover { background: rgba(255,255,255,0.05); }
     .row-click-area { display: flex; align-items: center; flex: 1; height: 100%; } 
@@ -418,10 +411,12 @@ const htmlContent = `
     .icon.rot { transform: rotate(90deg); }
     .txt { display: flex; flex-direction: column; }
     .sub { font-size: 0.8rem; color: var(--sub); }
+    
     .act { display: flex; gap: 4px; }
     .ib { background: transparent; border: none; color: var(--sub); padding: 8px; cursor: pointer; border-radius: 50%; z-index: 10; display:flex; align-items:center; justify-content:center; }
-    .ib-move { opacity: 0.5; transform: scale(0.9); }
-    .ib-move:hover { opacity: 1; }
+    .ib:hover { color: var(--txt); background: rgba(255,255,255,0.1); }
+    .ib-move { color: var(--warn); }
+    .ib-del { color: var(--stop); }
 
     .ovl { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); backdrop-filter:blur(8px); display:none; justify-content:center; align-items:flex-end; z-index: 1000; }
     .card { background: #1a1b20; width:100%; max-width:480px; padding:30px; border-radius:24px 24px 0 0; box-shadow: 0 -10px 40px #000; animation: up 0.3s; }
@@ -477,17 +472,23 @@ const htmlContent = `
 
         <div class="section-header">
             <span class="section-title">CHANNELS</span>
-            <div>
-                <button class="btn-add" onclick="window.ui.modal('add_folder')">+ FOLDER</button>
-                <button class="btn-add" onclick="window.ui.modal('add_freq')">+ FREQ</button>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <button id="btnEditToggle" class="btn-edit-toggle" onclick="window.ui.togEdit()">EDIT</button>
+                <div id="addBtns" class="edit-controls">
+                    <button class="btn-add" onclick="window.ui.modal('add_folder')">+ FOLDER</button>
+                    <button class="btn-add" onclick="window.ui.modal('add_freq')">+ FREQ</button>
+                </div>
             </div>
         </div>
+        
+        <!-- List Container with dynamic class for Edit Mode -->
         <div class="panel" id="listBM" style="padding:10px;"></div>
 
         <div class="section-header"><span class="section-title">RECORDINGS</span></div>
         <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
+    <!-- Modals (Unchanged) -->
     <div class="ovl" id="modalTune">
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
@@ -528,7 +529,7 @@ const htmlContent = `
 
 <script>
     let audioCtx;
-    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null };
+    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false };
     let nextStartTime = 0; 
 
     window.ui = {
@@ -542,32 +543,23 @@ const htmlContent = `
             window.ws.connect();
         },
 
-        // Manual Audio Toggle Control
         togAudio() {
             const btn = document.getElementById('btnAudio');
-            
-            // 1. Init if not exists
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new Ctx(); 
-                
-                // Background keep-alive
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
                 audioEl.play().catch(e=>{});
                 window.audioDest = dest;
-
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
                 osc.connect(g); g.connect(dest);
                 osc.frequency.value=10; g.gain.value=0.001; osc.start();
-                
                 this.updateBtnState('running');
                 return;
             }
-
-            // 2. Toggle State
             if (audioCtx.state === 'running') {
                 audioCtx.suspend().then(() => this.updateBtnState('suspended'));
             } else {
@@ -595,22 +587,32 @@ const htmlContent = `
             ['off','weak','mid','strong'].forEach(k => { document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':''); });
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
+            if('mediaSession' in navigator) navigator.mediaSession.metadata.title = (m.freq/1e6).toFixed(3) + ' MHz (' + m.mode + ')';
+        },
+        renderSq(v) { this.els.sq.style.left = v + '%'; this.els.valSq.innerText = v; },
+        adjSq(delta) { let n = state.squelch + delta; if (n < 0) n = 0; if (n > 100) n = 100; state.squelch = n; this.renderSq(n); window.ws.sendSq(n); },
+        
+        // --- Edit Mode Logic ---
+        togEdit() {
+            state.editMode = !state.editMode;
+            const btn = document.getElementById('btnEditToggle');
+            const ctrls = document.getElementById('addBtns');
+            const panel = document.getElementById('listBM');
             
-            if('mediaSession' in navigator) {
-                navigator.mediaSession.metadata.title = (m.freq/1e6).toFixed(3) + ' MHz (' + m.mode + ')';
+            if (state.editMode) {
+                btn.innerText = 'DONE';
+                btn.classList.add('editing');
+                ctrls.classList.add('show');
+                panel.classList.add('edit-mode');
+            } else {
+                btn.innerText = 'EDIT';
+                btn.classList.remove('editing');
+                ctrls.classList.remove('show');
+                panel.classList.remove('edit-mode');
             }
+            this.renderBM();
         },
-        renderSq(v) {
-            this.els.sq.style.left = v + '%'; 
-            this.els.valSq.innerText = v;
-        },
-        adjSq(delta) {
-            let n = state.squelch + delta;
-            if (n < 0) n = 0; if (n > 100) n = 100;
-            state.squelch = n;
-            this.renderSq(n);
-            window.ws.sendSq(n);
-        },
+
         modal(type, id=null) {
             this.closeModal(); 
             if (type === 'tune') {
@@ -674,46 +676,66 @@ const htmlContent = `
             document.getElementById('listBM').innerHTML = this.tree(roots);
         },
         tree(nodes) {
+            const isEdit = state.editMode;
+            
             return nodes.map((n, idx) => {
                 const isFirst = idx === 0;
                 const isLast = idx === nodes.length - 1;
-                const moveBtns = \`
-                    \${!isFirst ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'up')"><span class="material-symbols-outlined">arrow_upward</span></button>\` : ''}
-                    \${!isLast ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>\` : ''}
-                \`;
+                
+                // Only show Edit Controls in Edit Mode
+                let acts = '';
+                if (isEdit) {
+                    const moveBtns = \`
+                        \${!isFirst ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'up')"><span class="material-symbols-outlined">arrow_upward</span></button>\` : ''}
+                        \${!isLast ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>\` : ''}
+                    \`;
+                    
+                    const addSubBtn = n.isFolder ? \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')"><span class="material-symbols-outlined">add</span></button>\` : '';
+                    
+                    acts = \`
+                        \${moveBtns}
+                        \${addSubBtn}
+                        <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
+                        <button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                    \`;
+                }
+
+                // Interaction Logic
+                let onClick = '';
+                let cursor = '';
+                
+                if (n.isFolder) {
+                    // Folder: Always toggle expand (Edit mode also allows expanding to see children)
+                    onClick = \`window.ui.tog('\${n.id}')\`;
+                } else {
+                    // Channel: Tune only in View Mode. In Edit Mode, clicking row does nothing (safety)
+                    if (!isEdit) onClick = \`window.ws.tuneDir(\${n.freq}, '\${n.mode}')\`;
+                    else onClick = "event.stopPropagation(); window.ui.modal('edit', '"+n.id+"')"; // Edit on click in edit mode
+                }
 
                 if(n.isFolder) {
                     const open = state.expanded.has(n.id);
                     return \`
                         <div>
-                            <div class="row" onclick="window.ui.tog('\${n.id}')">
+                            <div class="row" onclick="\${onClick}">
                                 <div class="row-click-area">
                                     <span class="material-symbols-outlined icon \${open?'rot':''}">chevron_right</span>
                                     <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
                                 </div>
-                                <div class="act">
-                                    \${moveBtns}
-                                    <button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')"><span class="material-symbols-outlined">add</span></button>
-                                    <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
-                                    <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
-                                </div>
+                                <div class="act">\${acts}</div>
                             </div>
                             <div class="folder-c \${open?'open':''}">\${this.tree(n.c)}</div>
                         </div>\`;
                 }
                 return \`
-                    <div class="row" onclick="window.ws.tuneDir(\${n.freq}, '\${n.mode}')">
+                    <div class="row" onclick="\${onClick}">
                         <div class="row-click-area">
                             <div class="txt">
                                 <span style="font-weight:600;">\${n.title}</span>
                                 <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
                             </div>
                         </div>
-                        <div class="act">
-                            \${moveBtns}
-                            <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
-                            <button class="ib" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
-                        </div>
+                        <div class="act">\${acts}</div>
                     </div>\`;
             }).join('');
         },
@@ -732,7 +754,7 @@ const htmlContent = `
                     </div>
                     <div class="act">
                         <a href="/download/\${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
-                        <button class="ib" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
+                        <button class="ib ib-del" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
                 </div>\`).join('');
         }
@@ -824,7 +846,6 @@ const htmlContent = `
             if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
             else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
 
-            // Updated for 48kHz
             const f = new Float32Array((b.byteLength - 4) / 2);
             const s16 = new Int16Array(b, 4);
             for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
