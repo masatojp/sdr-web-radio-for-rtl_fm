@@ -737,14 +737,14 @@ const htmlContent = `
             let html = '';
             // Root
             if (parentId === null) {
-                html += `<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>`;
+                html += \`<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>\`;
             }
             
             const children = state.bm.filter(b => b.parentId === parentId && b.isFolder);
             children.forEach(c => {
                 if (c.id === state.moveTargetId) return; // Can't move into self
                 const pad = depth * 20;
-                html += `<div class="move-item" style="padding-left:${12+pad}px" onclick="window.ws.changeParent('${c.id}')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> ${c.title}</div>`;
+                html += \`<div class="move-item" style="padding-left:\${12+pad}px" onclick="window.ws.changeParent('\${c.id}')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> \${c.title}</div>\`;
                 html += this.genFolderListHtml(c.id, depth + 1);
             });
             return html;
@@ -783,27 +783,27 @@ const htmlContent = `
                 // Only show Edit Controls in Edit Mode
                 let acts = '';
                 if (isEdit) {
-                    const moveBtns = `
-                        ${!isFirst ? `<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('${n.id}', 'up')"><span class="material-symbols-outlined">arrow_upward</span></button>` : ''}
-                        ${!isLast ? `<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>` : ''}
-                    `;
+                    const moveBtns = \`
+                        \${!isFirst ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'up')"><span class="material-symbols-outlined">arrow_upward</span></button>\` : ''}
+                        \${!isLast ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>\` : ''}
+                    \`;
                     
                     let addSubBtns = '';
                     if (n.isFolder) {
-                        addSubBtns += `<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '${n.id}')" title="Add Channel"><span class="material-symbols-outlined">add</span></button>`;
-                        addSubBtns += `<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_folder', '${n.id}')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>`;
+                        addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')" title="Add Channel"><span class="material-symbols-outlined">add</span></button>\`;
+                        addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_folder', '\${n.id}')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>\`;
                     }
                     
                     // Move Folder/Item Button
-                    const moveParentBtn = `<button class="ib" onclick="event.stopPropagation(); window.ui.modal('move', '${n.id}')" title="Move to Folder"><span class="material-symbols-outlined">drive_file_move</span></button>`;
+                    const moveParentBtn = \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('move', '\${n.id}')" title="Move to Folder"><span class="material-symbols-outlined">drive_file_move</span></button>\`;
 
-                    acts = `
-                        ${moveBtns}
-                        ${moveParentBtn}
-                        ${addSubBtns}
-                        <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '${n.id}')"><span class="material-symbols-outlined">edit</span></button>
-                        <button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del('${n.id}')"><span class="material-symbols-outlined">delete</span></button>
-                    `;
+                    acts = \`
+                        \${moveBtns}
+                        \${moveParentBtn}
+                        \${addSubBtns}
+                        <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
+                        <button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                    \`;
                 }
 
                 // Interaction Logic
@@ -812,37 +812,37 @@ const htmlContent = `
                 
                 if (n.isFolder) {
                     // Folder: Always toggle expand (Edit mode also allows expanding to see children)
-                    onClick = `window.ui.tog('${n.id}')`;
+                    onClick = \`window.ui.tog('\${n.id}')\`;
                 } else {
                     // Channel: Tune only in View Mode. In Edit Mode, clicking row does nothing (safety)
-                    if (!isEdit) onClick = `window.ws.tuneDir(${n.freq}, '${n.mode}')`;
+                    if (!isEdit) onClick = \`window.ws.tuneDir(\${n.freq}, '\${n.mode}')\`;
                     else onClick = "event.stopPropagation(); window.ui.modal('edit', '"+n.id+"')"; // Edit on click in edit mode
                 }
 
                 if(n.isFolder) {
                     const open = state.expanded.has(n.id);
-                    return `
+                    return \`
                         <div>
-                            <div class="row" onclick="${onClick}">
+                            <div class="row" onclick="\${onClick}">
                                 <div class="row-click-area">
-                                    <span class="material-symbols-outlined icon ${open?'rot':''}">chevron_right</span>
-                                    <span style="font-weight:600; margin-left:10px;">${n.title}</span>
+                                    <span class="material-symbols-outlined icon \${open?'rot':''}">chevron_right</span>
+                                    <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
                                 </div>
-                                <div class="act">${acts}</div>
+                                <div class="act">\${acts}</div>
                             </div>
-                            <div class="folder-c ${open?'open':''}">${this.tree(n.c)}</div>
-                        </div>`;
+                            <div class="folder-c \${open?'open':''}">\${this.tree(n.c)}</div>
+                        </div>\`;
                 }
-                return `
-                    <div class="row" onclick="${onClick}">
+                return \`
+                    <div class="row" onclick="\${onClick}">
                         <div class="row-click-area">
                             <div class="txt">
-                                <span style="font-weight:600;">${n.title}</span>
-                                <span class="sub">${n.freq.toFixed(3)} MHz ${n.mode}</span>
+                                <span style="font-weight:600;">\${n.title}</span>
+                                <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
                             </div>
                         </div>
-                        <div class="act">${acts}</div>
-                    </div>`;
+                        <div class="act">\${acts}</div>
+                    </div>\`;
             }).join('');
         },
         tog(id) {
@@ -850,19 +850,19 @@ const htmlContent = `
             this.renderBM();
         },
         renderRec(list) {
-            document.getElementById('listRec').innerHTML = list.map(f => `
+            document.getElementById('listRec').innerHTML = list.map(f => \`
                 <div class="row">
                     <div class="row-click-area">
                         <div class="txt">
-                            <span style="font-weight:600;">${f.name.split('_')[2]||f.name}</span>
-                            <span class="sub">${(f.size/1024/1024).toFixed(2)} MB</span>
+                            <span style="font-weight:600;">\${f.name.split('_')[2]||f.name}</span>
+                            <span class="sub">\${(f.size/1024/1024).toFixed(2)} MB</span>
                         </div>
                     </div>
                     <div class="act">
-                        <a href="/download/${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
-                        <button class="ib ib-del" onclick="window.ws.delRec('${f.name}')"><span class="material-symbols-outlined">delete</span></button>
+                        <a href="/download/\${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
+                        <button class="ib ib-del" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
-                </div>`).join('');
+                </div>\`).join('');
         }
     };
 
