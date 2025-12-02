@@ -1,7 +1,7 @@
 /**
- * Modern Web SDR - Move Items Update + Background Playback Fix
+ * Modern Web SDR - Move Items Update + Background Playback Fix v2
  * Features: WFM Support, Safe Edit Mode, Bookmark Reordering, Nested Folders, Move Items
- * Enhanced: Media Session API Support (Notification Center Controls)
+ * Enhanced: Media Session API Support, Robust Initialization
  */
 
 require('dotenv').config();
@@ -561,6 +561,120 @@ const htmlContent = `
     const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null };
     let nextStartTime = 0; 
 
+    // --- 1. WebSocket Definition (Defined FIRST) ---
+    window.ws = {
+        c: null,
+        connect() {
+            this.c = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host);
+            this.c.binaryType = 'arraybuffer';
+            this.c.onmessage = e => {
+                if(typeof e.data === 'string') {
+                    const m = JSON.parse(e.data);
+                    if(m.type==='status_update') window.ui.upd(m);
+                    else if(m.type==='bookmarks') { state.bm = m.data; window.ui.renderBM(); }
+                    else if(m.type==='recordings') window.ui.renderRec(m.data);
+                    else if(m.type==='error') alert(m.msg);
+                } else this.audio(e.data);
+            };
+            this.c.onclose = () => setTimeout(()=>this.connect(), 3000);
+        },
+        send(o) { if(this.c&&this.c.readyState===1) this.c.send(JSON.stringify(o)); },
+        sendSq(v) { this.send({type:'set_squelch', val:parseInt(v)}); },
+        setMode(m) { state.mode=m; this.tune(true); },
+        setAtt(a) { this.send({type:'set_att', att:a}); },
+        togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
+        move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
+        changeParent(pid) {
+            if (state.moveTargetId) {
+                this.send({type:'change_parent', id:state.moveTargetId, newParentId:pid});
+                window.ui.closeModal();
+            }
+        },
+        tune(skip=false) {
+            let f = state.freq;
+            const m = window.ui.modalMode; 
+            if(!skip) { const v = parseFloat(document.getElementById('inpFreq').value); if(v) f = Math.floor(v*1e6); }
+            const p = document.getElementById('inpPass').value;
+            this.send({type:'auth_tune', password:p, freq:f, mode:m});
+            window.ui.closeModal();
+        },
+        tuneDir(f, m) {
+            const p = document.getElementById('inpPass').value;
+            if (!p) {
+                state.freq = Math.floor(f*1e6);
+                state.mode = m;
+                document.getElementById('inpFreq').value = f.toFixed(3);
+                window.ui.selMod(m);
+                window.ui.modal('tune');
+                return;
+            }
+            this.send({type:'auth_tune', password:p, freq:Math.floor(f*1e6), mode:m});
+            state.mode = m;
+        },
+        saveBookmark() {
+            const title = document.getElementById('addName').value;
+            if (!title) return;
+            const isFolder = (window.ui.addType === 'folder');
+            
+            if (state.editTargetId) {
+                const data = { id: state.editTargetId, title, isFolder };
+                if (!isFolder) {
+                    const freqVal = parseFloat(document.getElementById('addFreq').value);
+                    if (!freqVal) return;
+                    data.freq = freqVal;
+                    data.mode = window.ui.addMode;
+                }
+                this.send({type:'edit_bookmark', data});
+            } else {
+                const data = { title, isFolder, parentId: window.ui.targetParent };
+                if (!isFolder) {
+                    const freqVal = parseFloat(document.getElementById('addFreq').value);
+                    if (!freqVal) return;
+                    data.freq = freqVal;
+                    data.mode = window.ui.addMode;
+                }
+                this.send({type:'add_bookmark', data});
+            }
+            window.ui.closeModal();
+        },
+        del(id) { if(confirm('Delete?')) this.send({type:'delete_bookmark', id}); },
+        delRec(n) { if(confirm('Delete?')) this.send({type:'delete_recording', filename:n}); },
+        
+        audio(b) {
+            if(!audioCtx || audioCtx.state !== 'running') return;
+
+            const dv = new DataView(b);
+            const rssi = dv.getInt16(0, true);
+            const sqlOpen = dv.getInt16(2, true);
+            
+            const bar = window.ui.els.rssi;
+            bar.style.width = Math.min(100, (rssi/200)*100)+'%';
+            if(sqlOpen) bar.classList.add('active'); else bar.classList.remove('active');
+            const bdgSql = document.getElementById('bdgSql');
+            if (sqlOpen) { bdgSql.innerText = 'SQL OPEN'; bdgSql.className = 'badge badge-sql open'; } 
+            else { bdgSql.innerText = 'MUTED'; bdgSql.className = 'badge badge-sql'; }
+
+            const f = new Float32Array((b.byteLength - 4) / 2);
+            const s16 = new Int16Array(b, 4);
+            for(let i=0; i<f.length; i++) f[i] = s16[i]/32768.0;
+
+            const buf = audioCtx.createBuffer(1, f.length, 48000);
+            buf.getChannelData(0).set(f);
+
+            const now = audioCtx.currentTime;
+            if (nextStartTime < now) nextStartTime = now;
+
+            const s = audioCtx.createBufferSource();
+            s.buffer = buf;
+            if (window.audioDest) s.connect(window.audioDest);
+            else s.connect(audioCtx.destination);
+            
+            s.start(nextStartTime);
+            nextStartTime += buf.duration;
+        }
+    };
+
+    // --- 2. UI Definition (Defined SECOND) ---
     window.ui = {
         els: { freq:document.getElementById('dspFreq'), rssi:document.getElementById('dspRssi'), sq:document.getElementById('sqMarker'), valSq:document.getElementById('valSq') },
         modalMode: 'AM',
@@ -569,7 +683,13 @@ const htmlContent = `
         addType: 'freq',
 
         init() {
-            window.ws.connect();
+            // Check if window.ws exists before connecting
+            if (window.ws) {
+                window.ws.connect();
+            } else {
+                console.error("WebSocket controller not initialized!");
+            }
+            
             // Setup Media Session handlers initially
             if ('mediaSession' in navigator) {
                  navigator.mediaSession.setActionHandler('play', () => this.togAudio());
@@ -590,6 +710,8 @@ const htmlContent = `
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
+                
+                // Force play for mobile browsers (user interaction required)
                 audioEl.play().catch(e => console.log("Auto-play blocked", e));
                 
                 window.audioDest = dest;
@@ -600,6 +722,14 @@ const htmlContent = `
                 osc.connect(g); g.connect(dest);
                 osc.frequency.value = 10; g.gain.value = 0.001; osc.start();
                 
+                // *** ALSO Connect to main destination for sound! ***
+                // Note: The websocket audio data is routed to window.audioDest (which is the loopback stream)
+                // We typically need to route it to speakers too if we want to hear it, 
+                // BUT here we rely on the <audio> element playing the stream to hear it.
+                // However, some browsers mute streams unless connected to destination.
+                // Let's connect the gain to destination as well just in case.
+                g.connect(audioCtx.destination);
+
                 this.updateBtnState('running');
                 this.updateMediaSessionState('playing');
                 return;
@@ -631,12 +761,10 @@ const htmlContent = `
             }
         },
         
-        // --- NEW: Update Notification Metadata ---
         updateMediaSessionState(stateStr) {
             if (!('mediaSession' in navigator)) return;
             navigator.mediaSession.playbackState = stateStr;
             
-            // Set richer metadata for the notification center
             const title = \`🔴 LIVE: \${(state.freq/1e6).toFixed(3)} MHz\`;
             const artist = \`SDR Commander [\${state.mode}]\`;
             
@@ -650,16 +778,13 @@ const htmlContent = `
                 ]
             });
             
-            // Explicitly set position state to keep the media session active
             try {
                 navigator.mediaSession.setPositionState({
-                    duration: 3600, // Dummy long duration
+                    duration: 3600, 
                     playbackRate: 1.0,
                     position: 0
                 });
-            } catch(e) {
-                // Ignore errors if position state is not supported
-            }
+            } catch(e) {}
         },
 
         upd(m) {
@@ -672,7 +797,6 @@ const htmlContent = `
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
             
-            // Refresh metadata when freq changes
             if(audioCtx && audioCtx.state === 'running') {
                 this.updateMediaSessionState('playing');
             }
@@ -680,7 +804,6 @@ const htmlContent = `
         renderSq(v) { this.els.sq.style.left = v + '%'; this.els.valSq.innerText = v; },
         adjSq(delta) { let n = state.squelch + delta; if (n < 0) n = 0; if (n > 100) n = 100; state.squelch = n; this.renderSq(n); window.ws.sendSq(n); },
         
-        // --- Edit Mode Logic ---
         togEdit() {
             state.editMode = !state.editMode;
             const btn = document.getElementById('btnEditToggle');
@@ -747,14 +870,13 @@ const htmlContent = `
         },
         genFolderListHtml(parentId, depth) {
             let html = '';
-            // Root
             if (parentId === null) {
                 html += \`<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>\`;
             }
             
             const children = state.bm.filter(b => b.parentId === parentId && b.isFolder);
             children.forEach(c => {
-                if (c.id === state.moveTargetId) return; // Can't move into self
+                if (c.id === state.moveTargetId) return; 
                 const pad = depth * 20;
                 html += \`<div class="move-item" style="padding-left:\${12+pad}px" onclick="window.ws.changeParent('\${c.id}')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> \${c.title}</div>\`;
                 html += this.genFolderListHtml(c.id, depth + 1);
@@ -792,7 +914,6 @@ const htmlContent = `
                 const isFirst = idx === 0;
                 const isLast = idx === nodes.length - 1;
                 
-                // Only show Edit Controls in Edit Mode
                 let acts = '';
                 if (isEdit) {
                     const moveBtns = \`
@@ -806,7 +927,6 @@ const htmlContent = `
                         addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_folder', '\${n.id}')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>\`;
                     }
                     
-                    // Move Folder/Item Button
                     const moveParentBtn = \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('move', '\${n.id}')" title="Move to Folder"><span class="material-symbols-outlined">drive_file_move</span></button>\`;
 
                     acts = \`
@@ -818,17 +938,12 @@ const htmlContent = `
                     \`;
                 }
 
-                // Interaction Logic
                 let onClick = '';
-                let cursor = '';
-                
                 if (n.isFolder) {
-                    // Folder: Always toggle expand (Edit mode also allows expanding to see children)
                     onClick = \`window.ui.tog('\${n.id}')\`;
                 } else {
-                    // Channel: Tune only in View Mode. In Edit Mode, clicking row does nothing (safety)
                     if (!isEdit) onClick = \`window.ws.tuneDir(\${n.freq}, '\${n.mode}')\`;
-                    else onClick = "event.stopPropagation(); window.ui.modal('edit', '"+n.id+"')"; // Edit on click in edit mode
+                    else onClick = "event.stopPropagation(); window.ui.modal('edit', '"+n.id+"')"; 
                 }
 
                 if(n.isFolder) {
@@ -878,7 +993,13 @@ const htmlContent = `
         }
     };
 
-    window.ui.init();
+    // --- 3. Initialize ---
+    // Ensure DOM is ready, though usually fine at end of body.
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => window.ui.init());
+    } else {
+        window.ui.init();
+    }
 </script>
 </body>
 </html>
