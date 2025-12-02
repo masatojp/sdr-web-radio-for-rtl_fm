@@ -1,6 +1,7 @@
 /**
- * Modern Web SDR - Move Items Update
+ * Modern Web SDR - Move Items Update + Background Playback Fix
  * Features: WFM Support, Safe Edit Mode, Bookmark Reordering, Nested Folders, Move Items
+ * Enhanced: Media Session API Support (Notification Center Controls)
  */
 
 require('dotenv').config();
@@ -327,11 +328,9 @@ wss.on('connection', ws => {
                     }
                 }
             }
-            // 新しい親フォルダへの移動
             else if (c.type === 'change_parent') {
                 const item = bookmarks.find(b => b.id === c.id);
                 if (item) {
-                    // 簡易的な循環参照防止: 自分自身への移動を防ぐ
                     if (item.id !== c.newParentId) {
                         item.parentId = c.newParentId;
                         saveData();
@@ -554,7 +553,8 @@ const htmlContent = `
         </div>
     </div>
 
-    <audio id="audioBridge" style="display:none;" playsinline></audio>
+    <!-- Hidden Audio for Background Persistence -->
+    <audio id="audioBridge" autoplay playsinline style="display:none;"></audio>
 
 <script>
     let audioCtx;
@@ -570,29 +570,53 @@ const htmlContent = `
 
         init() {
             window.ws.connect();
+            // Setup Media Session handlers initially
+            if ('mediaSession' in navigator) {
+                 navigator.mediaSession.setActionHandler('play', () => this.togAudio());
+                 navigator.mediaSession.setActionHandler('pause', () => this.togAudio());
+                 navigator.mediaSession.setActionHandler('stop', () => this.togAudio());
+            }
         },
 
         togAudio() {
             const btn = document.getElementById('btnAudio');
+            
+            // First time setup or resume
             if (!audioCtx) {
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new Ctx(); 
+                
+                // Connect bridge to audio tag to keep background alive
                 const dest = audioCtx.createMediaStreamDestination();
                 const audioEl = document.getElementById('audioBridge');
                 audioEl.srcObject = dest.stream;
-                audioEl.play().catch(e=>{});
+                audioEl.play().catch(e => console.log("Auto-play blocked", e));
+                
                 window.audioDest = dest;
+                
+                // Start silent oscillator to keep pipeline active
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
                 osc.connect(g); g.connect(dest);
-                osc.frequency.value=10; g.gain.value=0.001; osc.start();
+                osc.frequency.value = 10; g.gain.value = 0.001; osc.start();
+                
                 this.updateBtnState('running');
+                this.updateMediaSessionState('playing');
                 return;
             }
+
             if (audioCtx.state === 'running') {
-                audioCtx.suspend().then(() => this.updateBtnState('suspended'));
+                audioCtx.suspend().then(() => {
+                    this.updateBtnState('suspended');
+                    this.updateMediaSessionState('paused');
+                    document.getElementById('audioBridge').pause();
+                });
             } else {
-                audioCtx.resume().then(() => this.updateBtnState('running'));
+                audioCtx.resume().then(() => {
+                    this.updateBtnState('running');
+                    this.updateMediaSessionState('playing');
+                    document.getElementById('audioBridge').play().catch(e=>{});
+                });
             }
         },
 
@@ -606,6 +630,25 @@ const htmlContent = `
                 btn.className = 'btn-audio-toggle';
             }
         },
+        
+        // --- NEW: Update Notification Metadata ---
+        updateMediaSessionState(stateStr) {
+            if (!('mediaSession' in navigator)) return;
+            navigator.mediaSession.playbackState = stateStr;
+            
+            // Set richer metadata for the notification center
+            const title = (state.freq/1e6).toFixed(3) + ' MHz';
+            const artist = 'SDR Commander (' + state.mode + ')';
+            
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: title,
+                artist: artist,
+                album: 'Live Receiver',
+                artwork: [
+                    { src: 'https://placehold.co/512x512/1a1b20/00ffc8?text=SDR', sizes: '512x512', type: 'image/png' }
+                ]
+            });
+        },
 
         upd(m) {
             state.freq=m.freq; state.mode=m.mode; state.att=m.att; state.rec=m.isRecording; state.squelch=m.squelch;
@@ -616,7 +659,11 @@ const htmlContent = `
             ['off','weak','mid','strong'].forEach(k => { document.getElementById('att'+k.charAt(0).toUpperCase()+k.slice(1)).className = 'btn '+(m.att===k?'active':''); });
             document.getElementById('btnRec').className = 'btn '+(m.isRecording?'rec on':'');
             this.renderSq(m.squelch);
-            if('mediaSession' in navigator) navigator.mediaSession.metadata.title = (m.freq/1e6).toFixed(3) + ' MHz (' + m.mode + ')';
+            
+            // Refresh metadata when freq changes
+            if(audioCtx && audioCtx.state === 'running') {
+                this.updateMediaSessionState('playing');
+            }
         },
         renderSq(v) { this.els.sq.style.left = v + '%'; this.els.valSq.innerText = v; },
         adjSq(delta) { let n = state.squelch + delta; if (n < 0) n = 0; if (n > 100) n = 100; state.squelch = n; this.renderSq(n); window.ws.sendSq(n); },
@@ -690,14 +737,14 @@ const htmlContent = `
             let html = '';
             // Root
             if (parentId === null) {
-                html += \`<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>\`;
+                html += `<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>`;
             }
             
             const children = state.bm.filter(b => b.parentId === parentId && b.isFolder);
             children.forEach(c => {
                 if (c.id === state.moveTargetId) return; // Can't move into self
                 const pad = depth * 20;
-                html += \`<div class="move-item" style="padding-left:\${12+pad}px" onclick="window.ws.changeParent('\${c.id}')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> \${c.title}</div>\`;
+                html += `<div class="move-item" style="padding-left:${12+pad}px" onclick="window.ws.changeParent('${c.id}')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> ${c.title}</div>`;
                 html += this.genFolderListHtml(c.id, depth + 1);
             });
             return html;
@@ -736,27 +783,27 @@ const htmlContent = `
                 // Only show Edit Controls in Edit Mode
                 let acts = '';
                 if (isEdit) {
-                    const moveBtns = \`
-                        \${!isFirst ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'up')"><span class="material-symbols-outlined">arrow_upward</span></button>\` : ''}
-                        \${!isLast ? \`<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('\${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>\` : ''}
-                    \`;
+                    const moveBtns = `
+                        ${!isFirst ? `<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('${n.id}', 'up')"><span class="material-symbols-outlined">arrow_upward</span></button>` : ''}
+                        ${!isLast ? `<button class="ib ib-move" onclick="event.stopPropagation(); window.ws.move('${n.id}', 'down')"><span class="material-symbols-outlined">arrow_downward</span></button>` : ''}
+                    `;
                     
                     let addSubBtns = '';
                     if (n.isFolder) {
-                        addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '\${n.id}')" title="Add Channel"><span class="material-symbols-outlined">add</span></button>\`;
-                        addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_folder', '\${n.id}')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>\`;
+                        addSubBtns += `<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_freq', '${n.id}')" title="Add Channel"><span class="material-symbols-outlined">add</span></button>`;
+                        addSubBtns += `<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_folder', '${n.id}')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>`;
                     }
                     
                     // Move Folder/Item Button
-                    const moveParentBtn = \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('move', '\${n.id}')" title="Move to Folder"><span class="material-symbols-outlined">drive_file_move</span></button>\`;
+                    const moveParentBtn = `<button class="ib" onclick="event.stopPropagation(); window.ui.modal('move', '${n.id}')" title="Move to Folder"><span class="material-symbols-outlined">drive_file_move</span></button>`;
 
-                    acts = \`
-                        \${moveBtns}
-                        \${moveParentBtn}
-                        \${addSubBtns}
-                        <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
-                        <button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
-                    \`;
+                    acts = `
+                        ${moveBtns}
+                        ${moveParentBtn}
+                        ${addSubBtns}
+                        <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '${n.id}')"><span class="material-symbols-outlined">edit</span></button>
+                        <button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del('${n.id}')"><span class="material-symbols-outlined">delete</span></button>
+                    `;
                 }
 
                 // Interaction Logic
@@ -765,37 +812,37 @@ const htmlContent = `
                 
                 if (n.isFolder) {
                     // Folder: Always toggle expand (Edit mode also allows expanding to see children)
-                    onClick = \`window.ui.tog('\${n.id}')\`;
+                    onClick = `window.ui.tog('${n.id}')`;
                 } else {
                     // Channel: Tune only in View Mode. In Edit Mode, clicking row does nothing (safety)
-                    if (!isEdit) onClick = \`window.ws.tuneDir(\${n.freq}, '\${n.mode}')\`;
+                    if (!isEdit) onClick = `window.ws.tuneDir(${n.freq}, '${n.mode}')`;
                     else onClick = "event.stopPropagation(); window.ui.modal('edit', '"+n.id+"')"; // Edit on click in edit mode
                 }
 
                 if(n.isFolder) {
                     const open = state.expanded.has(n.id);
-                    return \`
+                    return `
                         <div>
-                            <div class="row" onclick="\${onClick}">
+                            <div class="row" onclick="${onClick}">
                                 <div class="row-click-area">
-                                    <span class="material-symbols-outlined icon \${open?'rot':''}">chevron_right</span>
-                                    <span style="font-weight:600; margin-left:10px;">\${n.title}</span>
+                                    <span class="material-symbols-outlined icon ${open?'rot':''}">chevron_right</span>
+                                    <span style="font-weight:600; margin-left:10px;">${n.title}</span>
                                 </div>
-                                <div class="act">\${acts}</div>
+                                <div class="act">${acts}</div>
                             </div>
-                            <div class="folder-c \${open?'open':''}">\${this.tree(n.c)}</div>
-                        </div>\`;
+                            <div class="folder-c ${open?'open':''}">${this.tree(n.c)}</div>
+                        </div>`;
                 }
-                return \`
-                    <div class="row" onclick="\${onClick}">
+                return `
+                    <div class="row" onclick="${onClick}">
                         <div class="row-click-area">
                             <div class="txt">
-                                <span style="font-weight:600;">\${n.title}</span>
-                                <span class="sub">\${n.freq.toFixed(3)} MHz \${n.mode}</span>
+                                <span style="font-weight:600;">${n.title}</span>
+                                <span class="sub">${n.freq.toFixed(3)} MHz ${n.mode}</span>
                             </div>
                         </div>
-                        <div class="act">\${acts}</div>
-                    </div>\`;
+                        <div class="act">${acts}</div>
+                    </div>`;
             }).join('');
         },
         tog(id) {
@@ -803,19 +850,19 @@ const htmlContent = `
             this.renderBM();
         },
         renderRec(list) {
-            document.getElementById('listRec').innerHTML = list.map(f => \`
+            document.getElementById('listRec').innerHTML = list.map(f => `
                 <div class="row">
                     <div class="row-click-area">
                         <div class="txt">
-                            <span style="font-weight:600;">\${f.name.split('_')[2]||f.name}</span>
-                            <span class="sub">\${(f.size/1024/1024).toFixed(2)} MB</span>
+                            <span style="font-weight:600;">${f.name.split('_')[2]||f.name}</span>
+                            <span class="sub">${(f.size/1024/1024).toFixed(2)} MB</span>
                         </div>
                     </div>
                     <div class="act">
-                        <a href="/download/\${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
-                        <button class="ib ib-del" onclick="window.ws.delRec('\${f.name}')"><span class="material-symbols-outlined">delete</span></button>
+                        <a href="/download/${f.name}" class="ib" download><span class="material-symbols-outlined">download</span></a>
+                        <button class="ib ib-del" onclick="window.ws.delRec('${f.name}')"><span class="material-symbols-outlined">delete</span></button>
                     </div>
-                </div>\`).join('');
+                </div>`).join('');
         }
     };
 
