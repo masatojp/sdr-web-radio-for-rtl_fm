@@ -1,6 +1,6 @@
 /**
- * Modern Web SDR - Nested Folders Update
- * Features: WFM Support, Safe Edit Mode, Bookmark Reordering, Centered Modals, Nested Folders
+ * Modern Web SDR - Move Items Update
+ * Features: WFM Support, Safe Edit Mode, Bookmark Reordering, Nested Folders, Move Items
  */
 
 require('dotenv').config();
@@ -327,6 +327,18 @@ wss.on('connection', ws => {
                     }
                 }
             }
+            // 新しい親フォルダへの移動
+            else if (c.type === 'change_parent') {
+                const item = bookmarks.find(b => b.id === c.id);
+                if (item) {
+                    // 簡易的な循環参照防止: 自分自身への移動を防ぐ
+                    if (item.id !== c.newParentId) {
+                        item.parentId = c.newParentId;
+                        saveData();
+                        ws.send(JSON.stringify({type:'bookmarks', data:bookmarks}));
+                    }
+                }
+            }
             else if (c.type === 'delete_bookmark') { bookmarks = bookmarks.filter(b=>b.id!==c.id && b.parentId!==c.id); saveData(); ws.send(JSON.stringify({type:'bookmarks', data:bookmarks})); }
         } catch(e){}
     });
@@ -425,6 +437,11 @@ const htmlContent = `
     
     .inp { width:100%; background:#27282e; border:none; padding:16px; border-radius:12px; color:#fff; font-size:1.2rem; margin-bottom:15px; box-sizing:border-box; outline:none; }
     .inp:focus { outline: 2px solid var(--acc); }
+    
+    /* Move Folder List */
+    .move-item { padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px; cursor: pointer; display: flex; align-items: center; transition: 0.2s; }
+    .move-item:hover { background: rgba(255,255,255,0.1); }
+    .move-item.selected { background: var(--acc-dim); border: 1px solid var(--acc); color: var(--acc); }
 </style>
 </head>
 <body>
@@ -490,7 +507,7 @@ const htmlContent = `
         <div class="panel" id="listRec" style="padding:10px;"></div>
     </div>
 
-    <!-- Modals (Unchanged) -->
+    <!-- Modals -->
     <div class="ovl" id="modalTune">
         <div class="card">
             <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Set Frequency</div>
@@ -527,11 +544,21 @@ const htmlContent = `
         </div>
     </div>
 
+    <div class="ovl" id="modalMove">
+        <div class="card">
+            <div style="color:#fff; font-weight:700; font-size:1.2rem; margin-bottom:20px;">Move to Folder</div>
+            <div id="moveFolderList" style="max-height:300px; overflow-y:auto; display:flex; flex-direction:column; gap:8px;"></div>
+            <div style="display:flex; gap:10px; margin-top:20px;">
+                <button class="btn" style="flex:1" onclick="window.ui.closeModal()">CANCEL</button>
+            </div>
+        </div>
+    </div>
+
     <audio id="audioBridge" style="display:none;" playsinline></audio>
 
 <script>
     let audioCtx;
-    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false };
+    const state = { freq:0, mode:'AM', att:'off', rec:false, bm:[], expanded:new Set(), squelch: 10, editTargetId: null, editMode: false, moveTargetId: null };
     let nextStartTime = 0; 
 
     window.ui = {
@@ -652,11 +679,33 @@ const htmlContent = `
                      document.getElementById('addFreq').value = target.freq;
                      this.selAddMod(target.mode);
                 }
+            } else if (type === 'move') {
+                state.moveTargetId = id;
+                document.getElementById('modalMove').style.display = 'flex';
+                const list = document.getElementById('moveFolderList');
+                list.innerHTML = this.genFolderListHtml(null, 0);
             }
+        },
+        genFolderListHtml(parentId, depth) {
+            let html = '';
+            // Root
+            if (parentId === null) {
+                html += \`<div class="move-item" onclick="window.ws.changeParent(null)"><span class="material-symbols-outlined" style="margin-right:8px">home</span> ROOT</div>\`;
+            }
+            
+            const children = state.bm.filter(b => b.parentId === parentId && b.isFolder);
+            children.forEach(c => {
+                if (c.id === state.moveTargetId) return; // Can't move into self
+                const pad = depth * 20;
+                html += \`<div class="move-item" style="padding-left:\${12+pad}px" onclick="window.ws.changeParent('\${c.id}')"><span class="material-symbols-outlined" style="margin-right:8px">folder</span> \${c.title}</div>\`;
+                html += this.genFolderListHtml(c.id, depth + 1);
+            });
+            return html;
         },
         closeModal() {
             document.getElementById('modalTune').style.display = 'none';
             document.getElementById('modalAdd').style.display = 'none';
+            document.getElementById('modalMove').style.display = 'none';
         },
         selMod(m) {
             this.modalMode = m;
@@ -698,8 +747,12 @@ const htmlContent = `
                         addSubBtns += \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('add_folder', '\${n.id}')" title="Add Sub-Folder"><span class="material-symbols-outlined">create_new_folder</span></button>\`;
                     }
                     
+                    // Move Folder/Item Button
+                    const moveParentBtn = \`<button class="ib" onclick="event.stopPropagation(); window.ui.modal('move', '\${n.id}')" title="Move to Folder"><span class="material-symbols-outlined">drive_file_move</span></button>\`;
+
                     acts = \`
                         \${moveBtns}
+                        \${moveParentBtn}
                         \${addSubBtns}
                         <button class="ib" onclick="event.stopPropagation(); window.ui.modal('edit', '\${n.id}')"><span class="material-symbols-outlined">edit</span></button>
                         <button class="ib ib-del" onclick="event.stopPropagation(); window.ws.del('\${n.id}')"><span class="material-symbols-outlined">delete</span></button>
@@ -788,6 +841,12 @@ const htmlContent = `
         setAtt(a) { this.send({type:'set_att', att:a}); },
         togRec() { this.send({type:state.rec?'stop_recording':'start_recording'}); },
         move(id, dir) { this.send({type:'move_bookmark', id, dir}); },
+        changeParent(pid) {
+            if (state.moveTargetId) {
+                this.send({type:'change_parent', id:state.moveTargetId, newParentId:pid});
+                window.ui.closeModal();
+            }
+        },
         tune(skip=false) {
             let f = state.freq;
             const m = window.ui.modalMode; 
